@@ -1,0 +1,68 @@
+# Indo-Gangetic Plain agricultural fires, 2019-2026.
+# Seasons follow the user specification: Rabi 1 Mar - 30 Jun, Kharif 1 Oct - 31 Dec.
+# Jan, Feb, Jul, Aug and Sep fall in no window and are excluded; every figure
+# caption states this automatically.
+
+project: igp_agri_fires_2019_2026
+out_dir: ./output/igp
+
+start_date: 2019-01-01
+end_date: 2026-12-31
+
+regions:
+  - name: Uttar Pradesh
+    gpkg: ./gpkg/uttar_pradesh_admin.gpkg
+    boundary_layer: state_boundary
+    admin_layer: district_boundary
+    admin_field: DISTRICT
+    parent_field: STATE_UT
+  - name: Punjab
+    gpkg: ./gpkg/punjab_admin.gpkg
+  - name: Haryana
+    gpkg: ./gpkg/haryana_admin.gpkg
+  - name: Madhya Pradesh
+    gpkg: ./gpkg/madhya_pradesh_admin.gpkg
+
+seasons:
+  drop_unassigned: true
+  windows:
+    - name: Rabi
+      start: "03-01"
+      end: "06-30"
+      colour: "#F0A202"
+      label: Rabi (wheat residue)
+    - name: Kharif
+      start: "10-01"
+      end: "12-31"
+      colour: "#EE3B33"
+      label: Kharif (paddy residue)
+
+sensors:
+  platforms: [VIIRS_SNPP, VIIRS_NOAA20, MODIS]
+  processing: auto          # SP where archived, NRT for the recent tail
+  viirs_confidence: [h, n]  # 'l' dropped
+  modis_confidence_min: 30  # parity with VIIRS h+n
+  daynight: both
+  headline_platform_group: VIIRS   # MODIS kept as an independent cross-check
+
+mask:
+  kind: esa_worldcover
+  esa_version: v200
+  esa_year: 2021
+  esa_remote: true          # read tiles over /vsicurl, nothing to download
+  crop_classes: [40]
+  sampling: point           # switch to 'fraction' for footprint-aware masking
+  min_crop_fraction: 0.5
+
+firms:
+  cache_dir: ~/.cache/firepipe/firms
+  bbox_strategy: union      # one set of API calls for all four states
+  requests_per_10min: 4500
+
+plots:
+  enabled: true
+  dpi: 200
+  formats: [png]
+  figures: [all]
+  top_n_districts: 15
+  annotate_covid: false
