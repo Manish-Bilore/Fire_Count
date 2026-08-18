@@ -1,0 +1,6 @@
+stage,n_records,removed,retained_pct,note
+firms_raw,1617386,0,100.0,detections returned by the API
+within_admin_boundary,482526,1134860,29.83,clipped to region polygons
+confidence_filter,410198,72328,85.01,"VIIRS in ['h', 'n']; MODIS >= 30"
+season_window,410198,0,100.0,Rabi = 1 Mar to 30 Jun; Kharif = 1 Oct to 31 Dec
+cropland_mask,310466,99732,75.69,"Cropland mask: ESA WorldCover v200 (2021), class(es) [40]; sampled at detection centroid"
