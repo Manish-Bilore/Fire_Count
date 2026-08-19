@@ -21,9 +21,10 @@ from .firms import BBox, FirmsClient, FirmsError, ingest_csv
 from .masks import build_mask
 from .pipeline import Pipeline, detection_density, qc_tables
 from .plots import FigureSuite, render
+from .plots_simple import SimpleFigureSuite, render_both, render_simple
 from .seasons import SeasonCalendar
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "Config",
@@ -44,6 +45,9 @@ __all__ = [
     "qc_tables",
     "FigureSuite",
     "render",
+    "SimpleFigureSuite",
+    "render_simple",
+    "render_both",
     "SeasonCalendar",
     "__version__",
 ]

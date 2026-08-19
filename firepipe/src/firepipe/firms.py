@@ -177,9 +177,28 @@ class FirmsClient:
         """Date coverage per dataset id, used to route SP vs NRT."""
         if self._availability is not None and not refresh:
             return self._availability
-        key = self._require_key()
-        url = f"{BASE}/api/data_availability/csv/{key}/all"
-        text = self._get_text(url)
+
+        # Routing dates to SP vs NRT must give the same answer offline as it
+        # did when the blocks were first fetched, otherwise cache keys diverge
+        # and a fully cached run starts missing.
+        cache_file = self.cache_dir / "data_availability.csv"
+        fresh_enough = (
+            cache_file.exists()
+            and (time.time() - cache_file.stat().st_mtime) < 86_400
+        )
+        if fresh_enough and not refresh:
+            text = cache_file.read_text()
+        else:
+            try:
+                key = self._require_key()
+                text = self._get_text(f"{BASE}/api/data_availability/csv/{key}/all")
+                cache_file.write_text(text)
+            except FirmsError:
+                if not cache_file.exists():
+                    raise
+                log.info("Using cached dataset availability from %s", cache_file)
+                text = cache_file.read_text()
+
         df = pd.read_csv(io.StringIO(text))
         df.columns = [c.strip().lower() for c in df.columns]
         for col in ("min_date", "max_date"):
@@ -222,8 +241,6 @@ class FirmsClient:
     def fetch_block(
         self, source: str, bbox: BBox, start: date, day_range: int
     ) -> pd.DataFrame:
-        key = self._require_key()
-
         # Once the ceiling is known, split up front rather than spending a
         # transaction to be told 'no' again.
         if day_range > self.max_day_range:
@@ -237,6 +254,9 @@ class FirmsClient:
             self.stats["cache_hits"] += 1
             df = pd.read_csv(cache_file, dtype={"acq_time": str})
         else:
+            # The key is required only here, on a genuine cache miss, so a
+            # fully cached re-run works offline and without credentials.
+            key = self._require_key()
             url = (
                 f"{BASE}/api/area/csv/{key}/{source}/{bbox.as_param()}/"
                 f"{day_range}/{start:%Y-%m-%d}"

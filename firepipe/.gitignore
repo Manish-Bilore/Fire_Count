@@ -1,0 +1,88 @@
+# --- secrets -------------------------------------------------------------
+# The MAP_KEY belongs in the environment, never in the repository.
+.env
+*.key
+secrets.yaml
+**/config.local.yaml
+
+# --- pipeline outputs ----------------------------------------------------
+# Regenerable from a config plus a MAP_KEY. Committing them bloats history
+# and invites stale figures being cited as current.
+output/
+outputs/
+figs/
+*.parquet
+detections*.csv
+
+# Resolved configs are written into every output dir and echo the run's
+# settings; the secret is redacted, but they still do not belong in git.
+config.resolved.yaml
+manifest.json
+
+# --- input data ----------------------------------------------------------
+# Boundary files are often licensed (Survey of India products in particular)
+# and are large. Distribute them separately and document their provenance.
+gpkg/
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.tif
+*.tiff
+
+# --- caches --------------------------------------------------------------
+.cache/
+*.csv.gz
+
+# --- python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- environments --------------------------------------------------------
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# --- testing and tooling -------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# --- notebooks -----------------------------------------------------------
+.ipynb_checkpoints/
+
+# --- editors and OS ------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

@@ -219,6 +219,25 @@ balance grid.
 
 Render a subset with `plots.figures: ["01", "08", "20"]`.
 
+### Two presentation modes
+
+```bash
+firepipe run -c config.yaml --plots full     # default: figs/
+firepipe run -c config.yaml --plots simple   # simple_plots/
+firepipe run -c config.yaml --plots both
+```
+
+`full` figures carry an analytical summary caption, a subtitle, a mean
+reference line and an in-plot total, so a figure lifted out of its folder still
+states the sensor, confidence classes, mask and season windows behind it.
+
+`simple` figures drop all four, for slides and posters. The trade-off is real:
+they no longer describe their own filter, so quote the method statement from
+`manifest.json` whenever they leave your machine.
+
+Both sets are written from the same figure code; `plots_simple` overrides only
+the presentation hooks.
+
 Cumulative curves are plotted against days-since-window-opening rather than day
 of year, so they contain no flat gaps over excluded months. A final year whose
 record stops before the season window closes is flagged automatically:
@@ -346,9 +365,15 @@ print(pipe.funnel.to_frame())
 pytest -q
 ```
 
-22 tests covering season wrap logic, season-year attribution, request scheduling
-and chunking, config validation, MODIS/VIIRS schema normalisation, legacy label
-mapping, bbox arithmetic, and caption derivation.
+43 tests covering season wrap logic and season-year attribution, request
+scheduling and chunking, the FIRMS day-range ceiling and adaptive re-splitting,
+cached runs without credentials, config validation, MODIS/VIIRS schema
+normalisation and mixed-dtype serialisation, legacy label mapping, bbox
+arithmetic, mask sampling and its cache, artist counts per figure, and caption
+derivation.
+
+The suite is entirely offline: FIRMS responses are mocked and rasters
+synthesised, so it needs no MAP_KEY and no network.
 
 ---
 
@@ -360,3 +385,25 @@ conservatively, backs off on 429, and caches every retrieved block to
 `~/.cache/firepipe/firms`. An interrupted run resumes without re-spending quota,
 and re-running with different season or confidence settings against the same
 dates costs nothing.
+
+---
+
+## Repository contents
+
+Boundary GeoPackages and pipeline outputs are deliberately **not** in this
+repository. Boundary data is often licensed (Survey of India products in
+particular) and outputs are regenerable from a config plus a MAP_KEY. See
+`.gitignore` and `PUBLISHING.md`.
+
+To reproduce an analysis: install, supply your own boundary files under
+`gpkg/`, point a config at them, and run. `configs/igp_2019_2026.yaml` and
+`configs/up_only.yaml` are working examples.
+
+## Documentation
+
+| File | Contents |
+|---|---|
+| `SETUP.md` | Local install, first run, troubleshooting, file inventory |
+| `README.md` | Configuration reference, outputs, methodology, MCP tools |
+| `PUBLISHING.md` | Publishing this repository, secret handling |
+| `CHANGELOG.md` | Version history, including bugs found against the live API |

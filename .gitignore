@@ -1,0 +1,106 @@
+# .gitignore for the Fire_Count project root
+#
+# Place at /media/mb/HDD/Fire_Count_version_2/.gitignore
+#
+# Note: adding a pattern here does NOT untrack files git already knows about.
+# For anything already committed, see sync_to_github.sh or run:
+#     git rm -r --cached <path>
+
+# --- secrets -------------------------------------------------------------
+# The MAP_KEY belongs in the environment, never in the repository.
+.env
+*.key
+secrets.yaml
+**/config.local.yaml
+
+# --- pipeline outputs ----------------------------------------------------
+# Regenerable from a config plus a MAP_KEY, and large. Committing them bloats
+# history and invites stale figures being cited as current.
+#
+# These patterns cover every output directory naming scheme in use here:
+#   output/  outputs/  output_version_01/  output_platforms_.../
+#   UP_Fire_Count_output/
+output*/
+*_output/
+*_output_*/
+simple_plots/
+figs/
+
+# Artefacts by extension, wherever they land
+*.parquet
+detections*.csv
+config.resolved.yaml
+manifest.json
+qc_*.csv
+detection_density.csv
+
+# --- input data ----------------------------------------------------------
+# Boundary files are often licensed (Survey of India products in particular)
+# and are large. Distribute them separately and document their provenance.
+gpkg/
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.tif
+*.tiff
+
+# --- archives ------------------------------------------------------------
+*.zip
+*.tar
+*.tar.gz
+*.7z
+archive/
+
+# --- caches --------------------------------------------------------------
+.cache/
+*.csv.gz
+
+# --- python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+.Python
+
+# --- environments --------------------------------------------------------
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# --- R -------------------------------------------------------------------
+.Rhistory
+.RData
+.Rproj.user/
+
+# --- testing and tooling -------------------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- notebooks -----------------------------------------------------------
+.ipynb_checkpoints/
+
+# --- editors and OS ------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# --- brace-expansion accident --------------------------------------------
+# A stray directory literally named "{src" exists in the tree from a shell
+# typo. Delete it: rm -rf 'firepipe/{src'
+{src/

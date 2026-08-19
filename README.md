@@ -8,7 +8,7 @@ publication figure suite.
 What it does:
 
 1. **Extracts** FIRMS detections for any set of regions defined by GeoPackage
-   boundaries, requesting only the dates that fall inside the season windows.
+   boundaries, requesting only the dates that fall inside your season windows.
 2. **Masks** to cropland using precomputed rasters, ESA WorldCover, or Dynamic
    World.
 3. **Splits** by arbitrary season windows, including ones that wrap the new year.

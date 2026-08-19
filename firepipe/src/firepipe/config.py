@@ -11,7 +11,7 @@ import hashlib
 import json
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -306,6 +306,44 @@ class Config(BaseModel):
     plots: PlotConfig = PlotConfig()
 
     @model_validator(mode="after")
+    def _headline_group_is_present(self) -> "Config":
+        """The headline group must actually be among the platforms fetched.
+
+        Otherwise every figure filters down to an empty frame and the run
+        produces no figures at all, silently.
+        """
+        plats = self.sensors.platforms
+        has_viirs = any(p.startswith("VIIRS") for p in plats)
+        has_modis = "MODIS" in plats
+        group = self.sensors.headline_platform_group
+
+        if group == "VIIRS" and not has_viirs:
+            raise ValueError(
+                f"headline_platform_group is 'VIIRS' but platforms is {plats}, which "
+                "contains no VIIRS sensor. Every figure would be empty. Set "
+                "headline_platform_group: MODIS."
+            )
+        if group == "MODIS" and not has_modis:
+            raise ValueError(
+                f"headline_platform_group is 'MODIS' but platforms is {plats}, which "
+                "does not include MODIS. Every figure would be empty. Set "
+                "headline_platform_group to a VIIRS group."
+            )
+        if group == "BOTH" and not (has_viirs and has_modis):
+            present = "VIIRS" if has_viirs else "MODIS"
+            raise ValueError(
+                f"headline_platform_group is 'BOTH' but platforms is {plats}. 'BOTH' "
+                "means pooling VIIRS with MODIS across instruments, and only "
+                f"{present} is present here.\n"
+                f"Set headline_platform_group: {present}. Note that a group already "
+                "pools every satellite within it, so 'VIIRS' with "
+                "[VIIRS_SNPP, VIIRS_NOAA20] sums both satellites - which is what "
+                "you want, and is a sounder sum than 'BOTH' because the footprints "
+                "match."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _check_dates(self) -> "Config":
         if self.end_date < self.start_date:
             raise ValueError("end_date must not precede start_date")
@@ -321,8 +359,18 @@ class Config(BaseModel):
             raw = yaml.safe_load(fh)
         return cls.model_validate(raw)
 
-    def to_yaml(self, path: str | Path) -> None:
+    REDACTED: ClassVar[str] = "<redacted: set FIRMS_MAP_KEY in the environment>"
+
+    def to_yaml(self, path: str | Path, redact_secrets: bool = True) -> None:
+        """Write the resolved config.
+
+        The MAP_KEY is redacted by default. This file is written into every
+        output directory and is exactly the kind of thing that gets committed
+        to a repository by accident.
+        """
         payload = json.loads(self.model_dump_json())
+        if redact_secrets and payload.get("firms", {}).get("map_key"):
+            payload["firms"]["map_key"] = self.REDACTED
         with open(Path(path).expanduser(), "w") as fh:
             yaml.safe_dump(payload, fh, sort_keys=False, allow_unicode=True)
 

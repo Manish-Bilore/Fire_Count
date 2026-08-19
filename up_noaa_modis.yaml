@@ -1,0 +1,90 @@
+# Uttar Pradesh, 2019-2026 - NOAA-20 VIIRS and MODIS, pooled.
+#
+# `headline_platform_group: BOTH` sums the two platforms into one series, in
+# every figure and in both presentation modes.
+#
+# READ THIS BEFORE CITING ANY NUMBER FROM THIS RUN
+#
+# The two sensors are not count-comparable, so the sum is not a count of fires:
+#
+#   * Footprints differ by roughly seven times in area. MODIS resolves 1 km,
+#     NOAA-20 VIIRS resolves 375 m. One MODIS pixel can span several separate
+#     VIIRS detections of the same field.
+#   * The same fire seen by both platforms is counted twice. There is no
+#     cross-platform deduplication anywhere in this pipeline, by design.
+#   * The mix is not stable across the record. MODIS Terra and Aqua are well
+#     past design life; any change in their contribution moves the pooled total
+#     without any change in burning.
+#
+# The pooled series is therefore a detection-effort index, not an activity
+# measurement. Every figure produced by this config states "MODIS + VIIRS
+# pooled" in its title, so the caveat survives even into the simple plots,
+# which carry no captions.
+#
+# For a trend anyone can defend, use up_noaa.yaml or up_snpp.yaml, one platform
+# each, and treat their agreement as the evidence. Keep this run as the
+# combined-coverage view.
+#
+#   firepipe plan -c up_noaa_modis.yaml
+#   firepipe run  -c up_noaa_modis.yaml --density --plots both
+
+project: up_agri_fires_noaa20_modis_2019_2026
+out_dir: ./output/up_noaa20_modis   # distinct from up_snpp and up_noaa20
+
+start_date: 2019-01-01
+end_date: 2026-12-31
+
+regions:
+  - name: Uttar Pradesh
+    gpkg: ./gpkg/uttar_pradesh_admin.gpkg
+    boundary_layer: state_boundary
+    admin_layer: district_boundary
+    admin_field: DISTRICT
+    parent_field: STATE_UT
+
+seasons:
+  drop_unassigned: true
+  windows:
+    - name: Rabi
+      start: "03-01"
+      end: "06-30"
+      colour: "#F0A202"
+      label: Rabi (wheat residue)
+    - name: Kharif
+      start: "10-01"
+      end: "12-31"
+      colour: "#EE3B33"
+      label: Kharif (paddy residue)
+
+sensors:
+  platforms: [VIIRS_NOAA20, MODIS]
+  processing: auto
+  # Archive coverage for these two:
+  #   VIIRS_NOAA20_SP   2018-04-01 -> 2026-05-31,  NRT 2026-06-01 -> present
+  #   MODIS_SP          2000-11-01 -> 2026-04-30,  NRT 2026-05-01 -> present
+  viirs_confidence: [h, n]
+  modis_confidence_min: 30   # matched strictness against VIIRS h+n
+  daynight: both
+  headline_platform_group: BOTH   # sum the two platforms into one series
+
+mask:
+  kind: esa_worldcover
+  esa_version: v200
+  esa_year: 2021
+  esa_remote: true
+  crop_classes: [40]
+  sampling: point
+  cache_samples: true        # both platforms' coordinates are already cached
+
+firms:
+  cache_dir: ~/.cache/firepipe/firms
+  bbox_strategy: per_region  # same bbox as earlier UP runs, so blocks are cached
+  max_day_range: 5
+  requests_per_10min: 4500
+
+plots:
+  enabled: true
+  dpi: 200
+  formats: [png]
+  figures: [all]
+  top_n_districts: 15

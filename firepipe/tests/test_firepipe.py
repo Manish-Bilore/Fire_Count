@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import date
 
+import pathlib
+import tempfile
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -512,3 +515,368 @@ def test_mask_sample_cache_is_exact_and_keyed(tmp_path):
     # a different mask source must get a different cache file
     esa = ESAWorldCoverMask(MaskConfig(kind="esa_worldcover", cache_dir=str(tmp_path / "c")))
     assert esa._cache_key() != PrecomputedRasterMask(cfg)._cache_key()
+
+
+def test_resolved_config_never_writes_the_map_key(tmp_path):
+    """config.resolved.yaml lands in every output dir; it must not leak secrets."""
+    from firepipe.config import FirmsConfig
+
+    cfg = Config(
+        start_date=date(2019, 1, 1), end_date=date(2025, 12, 31),
+        regions=[{"name": "X", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI]),
+        firms=FirmsConfig(map_key="SUPERSECRETKEY123"),
+    )
+    out = tmp_path / "resolved.yaml"
+    cfg.to_yaml(out)
+    assert "SUPERSECRETKEY123" not in out.read_text()
+
+    # and the fingerprint must not depend on the key either
+    cfg2 = cfg.model_copy(deep=True)
+    cfg2.firms.map_key = "A_DIFFERENT_KEY"
+    assert cfg.fingerprint == cfg2.fingerprint
+
+
+# --------------------------------------------------------------------------
+# figures must draw exactly what the data contains
+# --------------------------------------------------------------------------
+
+
+def _demo_frame(years=(2019, 2020, 2021, 2022)):
+    rows = []
+    for y in years:
+        for season, mon in (("Rabi", 4), ("Kharif", 11)):
+            for day in (5, 12, 19, 26):
+                rows += [
+                    dict(region="UP", season=season, season_year=y, year=y, month=mon,
+                         doy=100, platform="VIIRS", sensor="VIIRS S-NPP (375 m)",
+                         acq_date=pd.Timestamp(f"{y}-{mon:02d}-{day:02d}").date(),
+                         confidence="n", frp=5.0, admin_unit=f"D{day}",
+                         latitude=27.0, longitude=81.0)
+                ] * 3
+    return pd.DataFrame(rows)
+
+
+def _artist_counts(cfg, df, method_name, region="UP"):
+    """Render one figure and report how many lines/bars/legend entries it drew."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from firepipe.plots import FigureSuite, FigureWriter
+
+    captured = {}
+
+    class Spy(FigureWriter):
+        def save(self, fig, name):
+            ax = fig.axes[0]
+            leg = ax.get_legend()
+            captured[name] = dict(
+                lines=len(ax.lines), bars=len(ax.patches),
+                legend=len(leg.get_texts()) if leg else 0,
+            )
+            plt.close(fig)
+
+    suite = FigureSuite(cfg, df)
+    getattr(suite, method_name)(suite.df, region, Spy(pathlib.Path(tempfile.mkdtemp())))
+    return captured
+
+
+def test_line_figures_draw_one_series_per_year(tmp_path):
+    """Guards against a whole DataFrame being passed where a column belongs:
+    that silently draws one line per column instead of one per year."""
+    from firepipe.config import Config, SeasonConfig
+
+    df = _demo_frame()
+    n_years = df["season_year"].nunique()
+    cfg = Config(
+        start_date=date(2019, 1, 1), end_date=date(2022, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "UP", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI, KHARIF]),
+    )
+
+    for method in ("f05_pentad", "f06_cumulative"):
+        counts = _artist_counts(cfg, df, method)
+        assert counts, f"{method} produced no figure"
+        for name, c in counts.items():
+            assert c["lines"] == n_years, (
+                f"{name}: drew {c['lines']} lines for {n_years} years"
+            )
+            assert c["legend"] == n_years, (
+                f"{name}: {c['legend']} legend entries for {n_years} years"
+            )
+
+
+def test_bar_figures_draw_one_bar_per_group(tmp_path):
+    from firepipe.config import Config, SeasonConfig
+
+    df = _demo_frame()
+    n_years = df["season_year"].nunique()
+    cfg = Config(
+        start_date=date(2019, 1, 1), end_date=date(2022, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "UP", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI, KHARIF]),
+    )
+    assert _artist_counts(cfg, df, "f01_yearly")["01_yearly_counts"]["bars"] == n_years
+    # one bar per season per year
+    assert (
+        _artist_counts(cfg, df, "f02_season_by_year")["02_season_by_year"]["bars"]
+        == n_years * 2
+    )
+
+
+def test_simple_suite_drops_furniture_but_keeps_data(tmp_path):
+    """plots_simple must remove caption/subtitle/mean line and nothing else."""
+    from firepipe.config import Config, SeasonConfig
+    from firepipe.plots import FigureSuite
+    from firepipe.plots_simple import SimpleFigureSuite
+
+    df = _demo_frame()
+    cfg = Config(
+        start_date=date(2019, 1, 1), end_date=date(2022, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "UP", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI, KHARIF]),
+    )
+    full = FigureSuite(cfg, df).render_all(tmp_path / "figs")
+    simple = SimpleFigureSuite(cfg, df).render_all(tmp_path / "simple_plots")
+
+    # same figures, different directories
+    assert {p.name for p in simple} == {p.name for p in full}
+    assert all("simple_plots" in str(p) for p in simple)
+    assert all("simple_plots" not in str(p) for p in full)
+
+    # the mean line is the only line on the yearly bar chart, so its absence
+    # is a clean signal that the furniture was dropped
+    counts_full = _artist_counts(cfg, df, "f01_yearly")["01_yearly_counts"]
+    assert counts_full["lines"] == 1
+
+
+def test_cached_run_needs_no_map_key(tmp_path, monkeypatch):
+    """Re-running an analysis whose blocks are all cached must not require
+    credentials or network access."""
+    from unittest.mock import patch
+
+    from firepipe.config import FirmsConfig
+    from firepipe.firms import BBox, FirmsClient, FirmsError
+
+    header = (
+        "latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,satellite,"
+        "instrument,confidence,version,bright_ti5,frp,daynight\n"
+    )
+    row = "27.0,81.0,330,0.4,0.4,2019-03-01,0745,N,VIIRS,n,2,290,5.1,D"
+
+    class Resp:
+        status_code, text = 200, header + row
+
+        def raise_for_status(self):
+            pass
+
+    bbox = BBox(76.9, 23.7, 84.7, 30.5)
+    cfg = FirmsConfig(cache_dir=str(tmp_path), max_day_range=5)
+
+    warm = FirmsClient(cfg, map_key="REALKEY")
+    with patch.object(warm.session, "get", return_value=Resp()):
+        first = warm.fetch_block("VIIRS_NOAA20_SP", bbox, date(2019, 3, 1), 5)
+
+    monkeypatch.delenv("FIRMS_MAP_KEY", raising=False)
+    cold = FirmsClient(cfg, map_key=None)
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("network was contacted on a cached read")
+
+    with patch.object(cold.session, "get", side_effect=no_network):
+        cached = cold.fetch_block("VIIRS_NOAA20_SP", bbox, date(2019, 3, 1), 5)
+        assert len(cached) == len(first)
+        assert cold.stats["cache_hits"] == 1
+
+        # a genuine miss must still fail, with the actionable message
+        with pytest.raises(FirmsError, match="MAP_KEY"):
+            cold.fetch_block("VIIRS_NOAA20_SP", bbox, date(2020, 3, 1), 5)
+
+
+def test_pooled_platforms_are_flagged_in_the_title(tmp_path):
+    """The pooling caveat lives in the caption, which simple mode removes, so
+    it must also appear in the title - the only text both modes keep."""
+    from firepipe.config import Config, SeasonConfig, SensorConfig
+    from firepipe.plots import FigureSuite
+    from firepipe.plots_simple import SimpleFigureSuite
+
+    df = _demo_frame()
+    base = dict(
+        start_date=date(2019, 1, 1), end_date=date(2022, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "UP", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI, KHARIF]),
+    )
+    pooled = Config(sensors=SensorConfig(headline_platform_group="BOTH"), **base)
+    single = Config(
+        sensors=SensorConfig(platforms=["VIIRS_SNPP"], headline_platform_group="VIIRS"),
+        **base,
+    )
+
+    for suite_cls in (FigureSuite, SimpleFigureSuite):
+        assert "MODIS + VIIRS pooled" in suite_cls(pooled, df)._title("Fire Detections")
+        assert "pooled" not in suite_cls(single, df)._title("Fire Detections")
+
+
+def test_two_viirs_satellites_are_flagged_as_pooled(tmp_path):
+    """A platform group pools every satellite in it, so two VIIRS platforms is
+    still a sum and must say so in the title."""
+    from firepipe.config import Config, SeasonConfig, SensorConfig
+    from firepipe.plots import FigureSuite
+    from firepipe.plots_simple import SimpleFigureSuite
+
+    df = _demo_frame()
+    base = dict(
+        start_date=date(2019, 1, 1), end_date=date(2022, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "UP", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI, KHARIF]),
+    )
+    two = Config(sensors=SensorConfig(platforms=["VIIRS_SNPP", "VIIRS_NOAA20"]), **base)
+    one = Config(sensors=SensorConfig(platforms=["VIIRS_SNPP"]), **base)
+
+    for suite_cls in (FigureSuite, SimpleFigureSuite):
+        assert "S-NPP + NOAA-20 pooled" in suite_cls(two, df)._title("Fire Detections")
+        assert "pooled" not in suite_cls(one, df)._title("Fire Detections")
+
+
+def test_both_group_error_names_the_right_setting():
+    """The error for two VIIRS platforms under 'BOTH' must point at 'VIIRS'."""
+    from firepipe.config import Config, SensorConfig
+
+    with pytest.raises(ValueError, match="Set headline_platform_group: VIIRS"):
+        Config(
+            start_date=date(2019, 1, 1), end_date=date(2025, 12, 31),
+            regions=[{"name": "X", "gpkg": "x.gpkg"}],
+            seasons=SeasonConfig(windows=[RABI]),
+            sensors=SensorConfig(
+                platforms=["VIIRS_SNPP", "VIIRS_NOAA20"], headline_platform_group="BOTH"
+            ),
+        )
+
+
+def test_wholesale_mask_failure_raises(tmp_path):
+    """A mask that classifies nothing must fail, not silently return zero rows."""
+    from unittest.mock import patch
+
+    from firepipe.config import Config, MaskConfig, SeasonConfig
+    from firepipe.pipeline import Pipeline
+
+    df = _demo_frame().assign(platform="VIIRS")
+    cfg = Config(
+        start_date=date(2019, 1, 1), end_date=date(2022, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "UP", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI, KHARIF]),
+        mask=MaskConfig(kind="esa_worldcover"),
+    )
+    pipe = Pipeline(cfg, map_key="X")
+
+    class DeadMask:
+        def apply(self, d):
+            out = d.copy()
+            out["land_cover"] = np.nan          # every read failed
+            out["crop_fraction"] = np.nan
+            out["is_cropland"] = False
+            return out
+
+    with patch("firepipe.pipeline.build_mask", return_value=DeadMask()):
+        with pytest.raises(RuntimeError, match="mask failure"):
+            pipe.apply_mask(df)
+
+
+def _tiny_gpkg(path):
+    """A minimal two-layer admin GeoPackage covering lon 80-82, lat 26-28."""
+    gpd = pytest.importorskip("geopandas")
+    from shapely.geometry import box
+
+    state = gpd.GeoDataFrame(
+        {"STATE": ["X"]}, geometry=[box(80.0, 26.0, 82.0, 28.0)], crs="EPSG:4326"
+    )
+    districts = gpd.GeoDataFrame(
+        {"DISTRICT": ["North", "South"], "STATE_UT": ["X", "X"]},
+        geometry=[box(80.0, 27.0, 82.0, 28.0), box(80.0, 26.0, 82.0, 27.0)],
+        crs="EPSG:4326",
+    )
+    state.to_file(path, layer="state_boundary", driver="GPKG")
+    districts.to_file(path, layer="district_boundary", driver="GPKG")
+    return str(path)
+
+
+def test_headline_group_must_be_among_the_platforms():
+    """A headline group absent from platforms filters every figure to empty."""
+    from firepipe.config import Config, SensorConfig
+
+    base = dict(
+        start_date=date(2019, 1, 1), end_date=date(2025, 12, 31),
+        regions=[{"name": "X", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI]),
+    )
+    with pytest.raises(ValueError, match="no VIIRS sensor"):
+        Config(sensors=SensorConfig(platforms=["MODIS"], headline_platform_group="VIIRS"), **base)
+    with pytest.raises(ValueError, match="does not include MODIS"):
+        Config(sensors=SensorConfig(platforms=["VIIRS_SNPP"], headline_platform_group="MODIS"), **base)
+    with pytest.raises(ValueError, match="Set headline_platform_group: MODIS"):
+        Config(sensors=SensorConfig(platforms=["MODIS"], headline_platform_group="BOTH"), **base)
+
+    # valid combinations are accepted
+    Config(sensors=SensorConfig(platforms=["MODIS"], headline_platform_group="MODIS"), **base)
+    Config(
+        sensors=SensorConfig(
+            platforms=["VIIRS_NOAA20", "MODIS"], headline_platform_group="BOTH"
+        ),
+        **base,
+    )
+
+
+def test_from_csv_honours_the_configured_platforms(tmp_path):
+    """An ingested archive must be restricted exactly as a live fetch would be."""
+    from firepipe.config import Config, MaskConfig, SeasonConfig, SensorConfig
+    from firepipe.pipeline import Pipeline
+
+    csv = tmp_path / "archive.csv"
+    pd.DataFrame({
+        "source": ["MODIS", "SUOMI", "VIIRS_J1", "MODIS"],
+        "latitude": [27.0, 27.1, 27.2, 27.3],
+        "longitude": [81.0, 81.1, 81.2, 81.3],
+        "acq_date": ["2024-11-05"] * 4,
+        "acq_time": ["0745"] * 4,
+        "confidence": [72, "n", "h", 80],
+        "frp": [4.2, 3.1, 8.0, 2.0],
+    }).to_csv(csv, index=False)
+
+    cfg = Config(
+        start_date=date(2024, 1, 1), end_date=date(2024, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "X", "gpkg": _tiny_gpkg(tmp_path / "admin.gpkg")}],
+        seasons=SeasonConfig(windows=[KHARIF]),
+        sensors=SensorConfig(platforms=["MODIS"], headline_platform_group="MODIS"),
+        mask=MaskConfig(kind="none"),
+    )
+    raw = Pipeline(cfg, map_key="X").fetch(from_csv=csv)
+    assert set(raw["platform"]) == {"MODIS"}
+    assert len(raw) == 2
+
+
+def test_from_csv_honours_the_configured_date_range(tmp_path):
+    from firepipe.config import Config, MaskConfig, SeasonConfig, SensorConfig
+    from firepipe.pipeline import Pipeline
+
+    csv = tmp_path / "archive.csv"
+    pd.DataFrame({
+        "source": ["SUOMI"] * 3,
+        "latitude": [27.0, 27.1, 27.2],
+        "longitude": [81.0, 81.1, 81.2],
+        "acq_date": ["2019-11-05", "2024-11-05", "2030-11-05"],
+        "acq_time": ["0745"] * 3,
+        "confidence": ["n", "n", "h"],
+        "frp": [4.2, 3.1, 8.0],
+    }).to_csv(csv, index=False)
+
+    cfg = Config(
+        start_date=date(2024, 1, 1), end_date=date(2024, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "X", "gpkg": _tiny_gpkg(tmp_path / "admin.gpkg")}],
+        seasons=SeasonConfig(windows=[KHARIF]),
+        sensors=SensorConfig(platforms=["VIIRS_SNPP"]),
+        mask=MaskConfig(kind="none"),
+    )
+    raw = Pipeline(cfg, map_key="X").fetch(from_csv=csv)
+    assert len(raw) == 1
+    assert str(raw["acq_date"].iloc[0]) == "2024-11-05"

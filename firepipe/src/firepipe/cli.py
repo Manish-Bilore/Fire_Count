@@ -14,6 +14,7 @@ from .config import DEFAULT_CONFIG_YAML, Config
 from .firms import FirmsClient
 from .pipeline import Pipeline, detection_density
 from .plots import render
+from .plots_simple import render_simple
 from .seasons import SeasonCalendar
 
 
@@ -106,8 +107,15 @@ def cmd_run(args) -> int:
     _show(pipe.funnel.to_frame())
 
     if not args.no_plots and cfg.plots.enabled:
-        paths = render(cfg, df, regions=pipe.regions)
-        print(f"\nRendered {len(paths)} figure files under {cfg.out_path / 'figs'}")
+        if args.plots in ("full", "both"):
+            paths = render(cfg, df, regions=pipe.regions)
+            print(f"\nRendered {len(paths)} annotated figures under {cfg.out_path / 'figs'}")
+        if args.plots in ("simple", "both"):
+            paths = render_simple(cfg, df, regions=pipe.regions)
+            print(
+                f"Rendered {len(paths)} simple figures under "
+                f"{cfg.out_path / 'simple_plots'} (no method text - pair with manifest.json)"
+            )
 
     if args.density and pipe.regions:
         dens = detection_density(df, pipe.regions)
@@ -124,8 +132,13 @@ def cmd_plot(args) -> int:
     df = pd.read_parquet(src) if src.suffix == ".parquet" else pd.read_csv(src)
     from .aoi import load_regions
 
-    paths = render(cfg, df, regions=load_regions(cfg.regions))
-    print(f"Rendered {len(paths)} figure files under {cfg.out_path / 'figs'}")
+    regions = load_regions(cfg.regions)
+    if args.plots in ("full", "both"):
+        paths = render(cfg, df, regions=regions)
+        print(f"Rendered {len(paths)} annotated figures under {cfg.out_path / 'figs'}")
+    if args.plots in ("simple", "both"):
+        paths = render_simple(cfg, df, regions=regions)
+        print(f"Rendered {len(paths)} simple figures under {cfg.out_path / 'simple_plots'}")
     return 0
 
 
@@ -184,11 +197,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--from-csv", help="ingest an existing FIRMS export instead of calling the API")
     s.add_argument("--no-plots", action="store_true")
     s.add_argument("--density", action="store_true", help="also write per-district density")
+    s.add_argument(
+        "--plots",
+        choices=["full", "simple", "both"],
+        default="full",
+        help="'full' = annotated figures in figs/; 'simple' = no caption, "
+             "subtitle or mean line, in simple_plots/; 'both' = each set",
+    )
+
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("plot", help="re-render figures from saved detections", parents=[common])
     s.add_argument("-c", "--config", required=True)
     s.add_argument("--data", help="parquet or csv of detections")
+    s.add_argument(
+        "--plots",
+        choices=["full", "simple", "both"],
+        default="full",
+        help="'full' = annotated figures in figs/; 'simple' = no caption, "
+             "subtitle or mean line, in simple_plots/; 'both' = each set",
+    )
+
     s.set_defaults(func=cmd_plot)
 
     s = sub.add_parser("serve", help="run the MCP server over stdio", parents=[common])

@@ -1,0 +1,95 @@
+# Uttar Pradesh, 2019-2026 - MODIS only.
+#
+# The third leg of the platform decomposition, alongside up_snpp.yaml and
+# up_noaa.yaml. Measured directly rather than inferred by subtraction, so the
+# three series can be compared without any arithmetic assumptions.
+#
+# Note `headline_platform_group: MODIS`. Leaving it on VIIRS with a MODIS-only
+# platform list would filter every figure down to an empty frame; the config
+# loader now rejects that combination outright.
+#
+# What to expect relative to the VIIRS runs:
+#
+#   * Far fewer detections. A 1 km pixel resolves fewer distinct fires than a
+#     375 m one, and small residue fires fall below the detection threshold
+#     entirely. Roughly an order of magnitude fewer is normal, not a bug.
+#   * Counts are NOT comparable in level with S-NPP or NOAA-20. The comparison
+#     that carries weight is direction: if MODIS and VIIRS both show a rise in
+#     the same year, the result is robust to sensor choice.
+#   * Confidence is numeric (0-100) here rather than the h/n/l classes, so the
+#     >= 30 threshold below is what makes it comparable in strictness to the
+#     VIIRS h+n filter used in the other configs. Change one and change both.
+#
+# Sensor ageing is the live risk on this series specifically. Terra launched
+# 1999 and Aqua 2002, both far past design life, and Terra's orbit has been
+# drifting since 2020 with its equator crossing time moving progressively
+# earlier. That shifts the observation window relative to the afternoon burning
+# peak, which can depress later years for reasons that have nothing to do with
+# how much was burned. Read qc_sensor_by_year.csv before reading any trend here.
+#
+#   firepipe plan -c up_modis.yaml
+#   firepipe run  -c up_modis.yaml --density --plots both
+
+project: up_agri_fires_modis_2019_2026
+out_dir: ./output/up_modis         # distinct from the other platform runs
+
+start_date: 2019-01-01
+end_date: 2026-12-31
+
+regions:
+  - name: Uttar Pradesh
+    gpkg: ./gpkg/uttar_pradesh_admin.gpkg
+    boundary_layer: state_boundary
+    admin_layer: district_boundary
+    admin_field: DISTRICT
+    parent_field: STATE_UT
+
+seasons:
+  drop_unassigned: true
+  windows:
+    - name: Rabi
+      start: "03-01"
+      end: "06-30"
+      colour: "#F0A202"
+      label: Rabi (wheat residue)
+    - name: Kharif
+      start: "10-01"
+      end: "12-31"
+      colour: "#EE3B33"
+      label: Kharif (paddy residue)
+
+sensors:
+  platforms: [MODIS]
+  processing: auto           # MODIS_SP to 2026-04-30, NRT 2026-05-01 onward
+  viirs_confidence: [h, n]   # unused here; kept so the config stays portable
+  modis_confidence_min: 30   # matched strictness against VIIRS h+n
+  daynight: both
+  headline_platform_group: MODIS
+
+mask:
+  kind: esa_worldcover
+  esa_version: v200
+  esa_year: 2021
+  esa_remote: true
+  crop_classes: [40]
+  sampling: point
+  cache_samples: true        # MODIS coordinates are already in the cache
+
+# A 1 km footprint against a 10 m mask sampled at the centroid is the weakest
+# link in this particular run: a MODIS pixel spans roughly 10,000 WorldCover
+# pixels, and centroid sampling asks only what sits at the middle of it. If a
+# reviewer challenges the masking, sampling: fraction with min_crop_fraction is
+# the defensible answer, and it matters more here than for VIIRS.
+
+firms:
+  cache_dir: ~/.cache/firepipe/firms
+  bbox_strategy: per_region  # same bbox as earlier UP runs, so blocks are cached
+  max_day_range: 5
+  requests_per_10min: 4500
+
+plots:
+  enabled: true
+  dpi: 200
+  formats: [png]
+  figures: [all]
+  top_n_districts: 15

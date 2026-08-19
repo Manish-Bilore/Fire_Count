@@ -102,6 +102,34 @@ class Pipeline:
             log.info("Ingesting existing archive: %s", from_csv)
             raw = ingest_csv(from_csv)
             self.funnel.record("ingested_from_csv", len(raw), str(from_csv))
+
+            # A live fetch only requests the configured platforms, so an
+            # ingested archive has to be restricted the same way - otherwise
+            # --from-csv silently analyses sensors the config excluded.
+            wanted = set(self.cfg.sensors.platforms)
+            if "platform_group" in raw.columns:
+                present = set(raw["platform_group"].dropna().unique())
+                if not present <= wanted:
+                    raw = raw[raw["platform_group"].isin(wanted)]
+                    self.funnel.record(
+                        "platform_filter",
+                        len(raw),
+                        f"kept {sorted(wanted)}; archive also held "
+                        f"{sorted(present - wanted)}",
+                    )
+
+            # And to the configured date span, for the same reason.
+            dates = pd.to_datetime(raw["acq_date"], errors="coerce")
+            in_span = dates.between(
+                pd.Timestamp(self.cfg.start_date), pd.Timestamp(self.cfg.end_date)
+            )
+            if not in_span.all():
+                raw = raw[in_span]
+                self.funnel.record(
+                    "date_range",
+                    len(raw),
+                    f"{self.cfg.start_date} to {self.cfg.end_date}",
+                )
             return raw
 
         ranges = self.calendar.fetch_ranges(self.cfg.start_date, self.cfg.end_date)
@@ -175,9 +203,29 @@ class Pipeline:
             self.funnel.record("daynight_filter", len(out), f"daynight == {s.daynight}")
         return out
 
+    #: Fail rather than silently return an empty analysis when this share of
+    #: detections comes back with no land-cover value at all.
+    MAX_UNCLASSIFIED = 0.20
+
     def apply_mask(self, df: pd.DataFrame) -> pd.DataFrame:
         mask = build_mask(self.cfg.mask)
         out = mask.apply(df)
+
+        if self.cfg.mask.kind != "none" and len(out):
+            unclassified = out["land_cover"].isna().mean()
+            if unclassified > self.MAX_UNCLASSIFIED:
+                raise RuntimeError(
+                    f"{unclassified:.0%} of {len(out):,} detections got no land-cover "
+                    "value, so the cropland mask cannot be trusted and would drop "
+                    "nearly everything. This is a mask failure, not a result.\n"
+                    "Common causes: no network route to the mask tiles, an SSL or "
+                    "proxy interception problem on the /vsicurl reads, or detections "
+                    "outside the mask's coverage.\n"
+                    "Check the warnings above, then either fix connectivity, set "
+                    "mask.esa_remote: false to download tiles once, or set "
+                    "mask.kind: none if masking is genuinely not wanted."
+                )
+
         if self.cfg.mask.kind != "none":
             kept = out[out["is_cropland"].fillna(False)].copy()
             self.funnel.record("cropland_mask", len(kept), self.cfg.mask.description)
@@ -232,8 +280,49 @@ class Pipeline:
 
     # -- outputs -----------------------------------------------------------
 
+    def _warn_if_overwriting(self, out: Path) -> None:
+        """Loudly flag an out_dir already holding a run from a different config.
+
+        Two configs pointed at one out_dir is an easy mistake to make when
+        copying a config to vary one setting, and it silently destroys the
+        earlier result.
+        """
+        manifest = out / "manifest.json"
+        if not manifest.exists():
+            return
+        try:
+            prev = json.loads(manifest.read_text())
+        except Exception:
+            return
+        if prev.get("config_fingerprint") == self.cfg.fingerprint:
+            return  # same analysis, deliberate re-run
+
+        changed = []
+        if prev.get("platforms") != self.cfg.sensors.platforms:
+            changed.append(
+                f"platforms {prev.get('platforms')} -> {self.cfg.sensors.platforms}"
+            )
+        if prev.get("mask") != self.cfg.mask.description:
+            changed.append("mask settings")
+        if prev.get("seasons") != self.calendar.definition_text():
+            changed.append("season windows")
+        if prev.get("regions") != [r.name for r in self.regions]:
+            changed.append(
+                f"regions {prev.get('regions')} -> {[r.name for r in self.regions]}"
+            )
+        log.warning(
+            "OVERWRITING a previous run in %s that used a different config "
+            "(%s, generated %s). Differences: %s. Set a distinct out_dir if you "
+            "meant to keep both.",
+            out,
+            prev.get("project", "unknown project"),
+            prev.get("generated_utc", "unknown time"),
+            "; ".join(changed) or "settings differ",
+        )
+
     def _write(self, df: pd.DataFrame) -> None:
         out = self.cfg.out_path
+        self._warn_if_overwriting(out)
         data_dir = out / "data"
         qc_dir = out / "qc"
         data_dir.mkdir(parents=True, exist_ok=True)

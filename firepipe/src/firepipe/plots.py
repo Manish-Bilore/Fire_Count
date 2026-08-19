@@ -202,9 +202,14 @@ def _frame(
     **kw,
 ):
     """Figure with the deck's title / subtitle / caption furniture in place."""
-    cap_lines = caption.count("\n") + 1
-    cap_h = 0.24 * cap_lines + 0.35  # caption band
-    head_h = 1.15 + (0.45 if nrows * ncols > 1 else 0.0)  # + panel-title room
+    # An empty subtitle or caption reclaims its band rather than leaving a gap,
+    # which is what makes the stripped-down variant in plots_simple look
+    # deliberate instead of merely missing its text.
+    has_caption = bool(caption and caption.strip())
+    has_subtitle = bool(subtitle and subtitle.strip())
+    cap_lines = (caption.count("\n") + 1) if has_caption else 0
+    cap_h = 0.24 * cap_lines + (0.35 if has_caption else 0.75)
+    head_h = (1.15 if has_subtitle else 0.75) + (0.45 if nrows * ncols > 1 else 0.0)
     total_h = height + cap_h + head_h
     fig, axes = plt.subplots(nrows, ncols, figsize=(width, total_h), squeeze=False, **kw)
     fig.subplots_adjust(
@@ -214,19 +219,16 @@ def _frame(
         wspace=0.22 if ncols > 1 else 0.2,
     )
     fig.text(0.5, 1 - 0.45 / total_h, title, ha="center", va="top", fontsize=21, fontweight="bold")
-    fig.text(
-        0.5, 1 - 0.95 / total_h, subtitle, ha="center", va="top", fontsize=14, color="#222222"
-    )
-    fig.text(
-        0.02,
-        0.012,
-        caption,
-        ha="left",
-        va="bottom",
-        fontsize=9.5,
-        color="#333333",
-        linespacing=1.45,
-    )
+    if has_subtitle:
+        fig.text(
+            0.5, 1 - 0.95 / total_h, subtitle, ha="center", va="top", fontsize=14,
+            color="#222222",
+        )
+    if has_caption:
+        fig.text(
+            0.02, 0.012, caption, ha="left", va="bottom", fontsize=9.5,
+            color="#333333", linespacing=1.45,
+        )
     return fig, axes
 
 
@@ -282,6 +284,55 @@ class FigureSuite:
         self.all = df
         self.df = _apply_headline_platform(df, cfg.sensors.headline_platform_group)
         self.cap = Captions(cfg, self.cal, self.df)
+
+    # -- overridable furniture --------------------------------------------
+    #
+    # Every figure builds its frame and its summary marks through these three
+    # methods. Subclasses change the presentation by overriding them, without
+    # touching a single figure body. See plots_simple.SimpleFigureSuite.
+
+    def _title(self, title: str) -> str:
+        """Mark pooled-platform figures in the title itself.
+
+        Pooling MODIS with VIIRS is stated in the caption, but the simple
+        figures have no caption. The title is the only text that survives every
+        presentation mode, so the warning belongs there too.
+        """
+        group = self.cfg.sensors.headline_platform_group
+        if group == "BOTH":
+            return f"{title} \u2014 MODIS + VIIRS pooled"
+        if group == "VIIRS":
+            # A group pools every satellite in it, so two VIIRS platforms means
+            # one fire can be counted twice, ~50 minutes apart. Footprints match
+            # so the sum is coherent, but it is still a sum.
+            sats = [
+                _PLATFORM_WORDS.get(p, p) for p in self.cfg.sensors.viirs_platforms
+            ]
+            if len(sats) > 1:
+                return f"{title} \u2014 {' + '.join(sats)} pooled"
+        return title
+
+    def _frame(self, title, subtitle, caption, **kw):
+        return _frame(self._title(title), subtitle, caption, **kw)
+
+    def _mean_line(self, ax, mean: float, label_fmt: str = "mean {:,.0f}") -> None:
+        """Dashed reference line at the series mean, labelled on the axis."""
+        ax.axhline(mean, ls="--", color="#666666", lw=1)
+        ax.text(
+            -0.008, mean, label_fmt.format(mean), transform=ax.get_yaxis_transform(),
+            ha="right", va="center", fontsize=10, color="#555555",
+        )
+
+    def _headroom(self, ax, factor: float = 1.18) -> None:
+        """Space above the tallest bar for value labels and in-plot notes."""
+        _headroom(ax, factor)
+
+    def _headline_note(self, ax, text: str) -> None:
+        """Large in-plot total, top left."""
+        ax.text(
+            0.01, 0.95, text, transform=ax.transAxes, fontsize=15,
+            fontweight="bold", color=BLUE_DARK, va="top",
+        )
 
     # -- driver ------------------------------------------------------------
 
@@ -357,7 +408,7 @@ class FigureSuite:
             f"{int(yr.loc[yr['fires'].idxmax(), 'season_year'])}",
             "Annual totals cover only the season windows above, not the full calendar year",
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             f"Agricultural Fire Detections, {region}: {_span(yr)}",
             f"{self.cap.sub_tag} \u2014 total {len(sub):,}",
             cap,
@@ -365,32 +416,13 @@ class FigureSuite:
         ax = ax[0][0]
         bars = ax.bar(yr["season_year"].astype(str), yr["fires"], color=RED, width=0.72)
         _bar_labels(ax, bars, yr["fires"])
-        ax.axhline(mean, ls="--", color="#666666", lw=1)
-        ax.text(
-            -0.008,
-            mean,
-            f"mean {mean:,.0f}",
-            transform=ax.get_yaxis_transform(),
-            ha="right",
-            va="center",
-            fontsize=10,
-            color="#555555",
-        )
-        ax.text(
-            0.01,
-            0.95,
-            f"Total: {len(sub):,} detections",
-            transform=ax.transAxes,
-            fontsize=15,
-            fontweight="bold",
-            color=BLUE_DARK,
-            va="top",
-        )
+        self._mean_line(ax, mean)
+        self._headline_note(ax, f"Total: {len(sub):,} detections")
         ax.set_xlabel("Season year")
         ax.set_ylabel("Fire count")
         ax.yaxis.set_major_formatter(COMMA)
         ax.grid(axis="x", visible=False)
-        _headroom(ax, 1.25)
+        self._headroom(ax, 1.25)
         if self.cfg.plots.annotate_covid:
             self._covid(ax, yr)
         w.save(fig, "01_yearly_counts")
@@ -404,7 +436,7 @@ class FigureSuite:
             "Bars are directly comparable only within a season: window lengths differ "
             f"({', '.join(f'{n} = {d} d' for n, d in _window_days(self.cal))})",
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             f"Seasonal Fire Detections by Year, {region}",
             f"{self.cap.sub_tag} \u2014 {self.cal.definition_text()}",
             cap,
@@ -417,7 +449,7 @@ class FigureSuite:
         ax.yaxis.set_major_formatter(COMMA)
         ax.grid(axis="x", visible=False)
         _legend(ax, title="Season", ncol=len(self.cal.names))
-        _headroom(ax, 1.3)
+        self._headroom(ax, 1.3)
         w.save(fig, "02_season_by_year")
 
     def f03_season_share(self, sub, region, w):
@@ -429,7 +461,7 @@ class FigureSuite:
         cap = self.cap.block(
             sub, "Composition, not magnitude: a rising share can coincide with falling counts"
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             f"Seasonal Composition of Fire Detections, {region}",
             self.cap.sub_tag,
             cap,
@@ -482,7 +514,7 @@ class FigureSuite:
             sub,
             "Panels share a y-axis; only months inside a season window are plotted",
         )
-        fig, axes = _frame(
+        fig, axes = self._frame(
             f"Monthly Fire Detections by Year, {region}",
             self.cap.sub_tag,
             cap,
@@ -525,7 +557,7 @@ class FigureSuite:
         cap = self.cap.block(
             sub, "Cells are counts; blank columns are months outside every season window"
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             f"Month \u00d7 Year Detection Matrix, {region}",
             self.cap.sub_tag,
             cap,
@@ -580,7 +612,7 @@ class FigureSuite:
                 f"({win.start} \u2192 {win.end})",
                 "Peak timing, not peak height, is the comparable quantity across years",
             )
-            fig, ax = _frame(
+            fig, ax = self._frame(
                 f"{season} Burning Window, 5-Day Intervals: {region}",
                 f"{self.cap.sub_tag} \u2014 {win.display_label}",
                 cap,
@@ -594,7 +626,7 @@ class FigureSuite:
                 dd = binned[binned["season_year"] == yr].sort_values("bin")
                 ax.plot(
                     dd["bin"],
-                    dd,
+                    dd["fires"],
                     marker="o",
                     ms=4,
                     lw=2,
@@ -605,7 +637,7 @@ class FigureSuite:
             ax.set_ylabel("Fire count")
             ax.yaxis.set_major_formatter(COMMA)
             _legend(ax, title="Season year", ncol=max(1, min(len(years), 4)), loc="upper left")
-            _headroom(ax, 1.35)
+            self._headroom(ax, 1.35)
             w.save(fig, f"05_{_slug(season)}_pentad")
 
     def f06_cumulative(self, sub, region, w):
@@ -630,7 +662,7 @@ class FigureSuite:
                 "burning compressed into fewer days",
                 "Curves are restricted to in-season days, so they have no flat gaps",
             )
-            fig, ax = _frame(
+            fig, ax = self._frame(
                 f"Cumulative {season} Detections, {region}",
                 self.cap.sub_tag,
                 cap,
@@ -651,7 +683,7 @@ class FigureSuite:
             ax.set_ylabel("Cumulative detections")
             ax.yaxis.set_major_formatter(COMMA)
             _legend(ax, title="Season year", ncol=max(1, min(len(years), 2)), loc="upper left")
-            _headroom(ax, 1.15)
+            self._headroom(ax, 1.15)
             w.save(fig, f"06_{_slug(season)}_cumulative")
 
     def f07_frp(self, sub, region, w):
@@ -669,7 +701,7 @@ class FigureSuite:
             "fires from fewer intense ones",
             "FRP is not comparable across sensors with different footprints",
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             f"Seasonal Fire Radiative Power Load, {region}",
             f"{self.cap.sub_tag} \u2014 summed FRP (MW)",
             cap,
@@ -682,7 +714,7 @@ class FigureSuite:
         ax.yaxis.set_major_formatter(COMMA)
         ax.grid(axis="x", visible=False)
         _legend(ax, title="Season", ncol=len(self.cal.names))
-        _headroom(ax, 1.3)
+        self._headroom(ax, 1.3)
         w.save(fig, "07_frp_seasonal")
 
     def f08_platform(self, raw_sub, region, w):
@@ -711,7 +743,7 @@ class FigureSuite:
                 + str(self.cfg.sensors.modis_confidence_min)
             ),
         )
-        fig, axes = _frame(
+        fig, axes = self._frame(
             f"Independent Sensor Cross-Check, {region}",
             "MODIS 1 km vs VIIRS 375 m \u2014 counts and normalised trend",
             cap,
@@ -734,7 +766,7 @@ class FigureSuite:
         ax1.yaxis.set_major_formatter(COMMA)
         ax1.grid(axis="x", visible=False)
         _legend(ax1)
-        _headroom(ax1, 1.15)
+        self._headroom(ax1, 1.15)
 
         base_year = years[0]
         for p in plats:
@@ -766,7 +798,7 @@ class FigureSuite:
                 continue
             yr = d.groupby("season_year").size().rename("fires").reset_index()
             win = self.cal.window(season)
-            fig, ax = _frame(
+            fig, ax = self._frame(
                 f"{season} Season Fire Detections by Year: {region}",
                 f"{win.display_label} \u2014 {win.start} to {win.end} \u2014 {self.cap.sub_tag}",
                 f"{self.cap.sensor_note}  |  {self.cap.conf_note}  |  {self.cap.mask_note}\n"
@@ -778,22 +810,12 @@ class FigureSuite:
             )
             _bar_labels(ax, bars, yr["fires"], colour="#333333")
             mean = yr["fires"].mean()
-            ax.axhline(mean, ls="--", color="#666666", lw=1)
-            ax.text(
-                -0.008,
-                mean,
-                f"mean {mean:,.0f}",
-                transform=ax.get_yaxis_transform(),
-                ha="right",
-                va="center",
-                fontsize=10,
-                color="#555555",
-            )
+            self._mean_line(ax, mean)
             ax.set_xlabel("Season year")
             ax.set_ylabel("Fire count")
             ax.yaxis.set_major_formatter(COMMA)
             ax.grid(axis="x", visible=False)
-            _headroom(ax, 1.2)
+            self._headroom(ax, 1.2)
             w.save(fig, f"09_{_slug(season)}_yearly")
 
     def f10_season_monthly(self, sub, region, w):
@@ -812,7 +834,7 @@ class FigureSuite:
             years = sorted(mo["season_year"].unique())
             ncols = min(4, len(years))
             nrows = int(np.ceil(len(years) / ncols))
-            fig, axes = _frame(
+            fig, axes = self._frame(
                 f"{season} Monthly Profile by Year: {region}",
                 f"{win.display_label} \u2014 {self.cap.sub_tag}",
                 f"{self.cap.sensor_note}  |  {self.cap.conf_note}  |  {self.cap.mask_note}\n"
@@ -855,7 +877,7 @@ class FigureSuite:
             f"{share:.0%} of all detections in {region}",
             "Counts are not area-normalised: larger districts accumulate more detections",
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             f"Districts by Fire Detections, {region}",
             f"{self.cap.sub_tag} \u2014 {_span_dates(sub)}",
             cap,
@@ -894,7 +916,7 @@ class FigureSuite:
             "Rows ordered by total detections; a row that brightens over time is a "
             "district where burning intensified",
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             f"District \u00d7 Year Detections, {region}",
             f"Top {len(grid)} districts \u2014 {self.cap.sub_tag}",
             cap,
@@ -937,7 +959,7 @@ class FigureSuite:
             "Left: raw counts. Right: detections per 1,000 km\u00b2, which removes the "
             "district-size effect and is the comparable quantity",
         )
-        fig, axes = _frame(
+        fig, axes = self._frame(
             f"Spatial Distribution of Fire Detections, {region}",
             f"{self.cap.sub_tag} \u2014 {_span_dates(sub)}",
             cap,
@@ -972,7 +994,7 @@ class FigureSuite:
             "States differ enormously in cropland extent; compare shapes over time, "
             "not bar heights between states",
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             "Agricultural Fire Detections by State",
             f"{self.cap.sub_tag} \u2014 {self.cal.definition_text()}",
             cap,
@@ -993,7 +1015,7 @@ class FigureSuite:
         ax.yaxis.set_major_formatter(COMMA)
         ax.grid(axis="x", visible=False)
         _legend(ax, ncol=min(len(regions), 4))
-        _headroom(ax, 1.32)
+        self._headroom(ax, 1.32)
         w.save(fig, "20_region_totals")
 
     def f21_region_index(self, w):
@@ -1010,7 +1032,7 @@ class FigureSuite:
             f"Each state indexed to its own {base} total = 100, which makes trajectories "
             "comparable across states of very different size",
         )
-        fig, ax = _frame(
+        fig, ax = self._frame(
             "Normalised Inter-Annual Trend by State",
             f"{base} = 100 \u2014 {self.cap.sub_tag}",
             cap,
@@ -1044,7 +1066,7 @@ class FigureSuite:
             self.df, "One panel per state; y-axes are independent so each state's own "
             "seasonal balance is legible"
         )
-        fig, axes = _frame(
+        fig, axes = self._frame(
             "Seasonal Balance by State and Year",
             f"{self.cap.sub_tag} \u2014 {self.cal.definition_text()}",
             cap,

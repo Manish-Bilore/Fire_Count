@@ -1,3 +1,0 @@
-season,label,start_md,end_md,wraps_year,n_days_common_year,n_days_leap_year,months_touched
-Rabi,Rabi (wheat residue),03-01,06-30,False,122,122,"Mar,Apr,May,Jun"
-Kharif,Kharif (paddy residue),10-01,12-31,False,92,92,"Oct,Nov,Dec"

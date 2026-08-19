@@ -44,6 +44,7 @@ from .config import Config, DEFAULT_CONFIG_YAML
 from .firms import FirmsClient, FirmsError
 from .pipeline import Pipeline, detection_density
 from .plots import render
+from .plots_simple import render_simple
 from .seasons import SeasonCalendar
 
 log = logging.getLogger("firepipe.mcp")
@@ -299,6 +300,17 @@ def firms_render_figures(
         list[str] | None,
         Field(description="Figure ids to render, e.g. ['01','08','20']; omit for all"),
     ] = None,
+    style: Annotated[
+        Literal["full", "simple", "both"],
+        Field(
+            description=(
+                "'full': annotated figures in figs/, each stating its own sensor, "
+                "confidence, mask and season filter. 'simple': no caption, subtitle "
+                "or mean line, written to simple_plots/ for slides - these carry no "
+                "method text, so quote manifest.json alongside them."
+            )
+        ),
+    ] = "full",
 ) -> dict:
     """Re-render figures from an existing run without re-fetching anything.
 
@@ -309,8 +321,18 @@ def firms_render_figures(
         cfg.plots.figures = figures
     regions = STATE.get("regions") or load_regions(cfg.regions)
     STATE["regions"] = regions
-    paths = render(cfg, df, regions=regions)
-    return {"ok": True, "n_files": len(paths), "files": [str(p) for p in paths]}
+    out: dict[str, Any] = {"ok": True}
+    if style in ("full", "both"):
+        paths = render(cfg, df, regions=regions)
+        out["annotated"] = {"n_files": len(paths), "dir": str(cfg.out_path / "figs")}
+    if style in ("simple", "both"):
+        paths = render_simple(cfg, df, regions=regions)
+        out["simple"] = {
+            "n_files": len(paths),
+            "dir": str(cfg.out_path / "simple_plots"),
+            "note": "No method text on these; cite manifest.json with them.",
+        }
+    return out
 
 
 # --------------------------------------------------------------------------
