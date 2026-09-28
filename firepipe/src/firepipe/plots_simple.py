@@ -1,4 +1,4 @@
-"""Stripped-down figures for slides and posters.
+"""Stripped-down figures for slides and posters, written as PNG and SVG.
 
 Same data, same colours, same figure bodies as :mod:`firepipe.plots` - only the
 explanatory furniture is removed:
@@ -11,8 +11,14 @@ explanatory furniture is removed:
 Everything is inherited, so a change to a figure in ``plots.py`` appears here
 automatically. Only the presentation hooks are overridden.
 
-Output goes to ``simple_plots/`` beside the standard ``figs/``, never on top of
-it, because the two are not interchangeable.
+Output splits by format, never inside either annotated folder:
+
+* ``simple_plots/<region>/*.png``  - raster, what you drop into slides
+* ``svg_simple/<region>/*.svg``    - vector, what you hand to a print pipeline
+
+The base :class:`FigureSuite` already writes both (PNGs via ``formats`` and an
+SVG mirror via ``svg_root``); this module only retargets the mirror and switches
+the captions off.  Nothing here needs to touch ``savefig`` itself.
 
     from firepipe.plots_simple import render_simple
     render_simple(cfg, df, regions=pipe.regions)
@@ -27,6 +33,7 @@ A simple figure does not. Pair them with the method statement from
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -40,16 +47,17 @@ log = logging.getLogger("firepipe.plots_simple")
 class SimpleFigureSuite(FigureSuite):
     """FigureSuite with the explanatory furniture switched off."""
 
-    #: Written alongside figs/, not into it.
+    #: PNG folder.  Sits beside figs/ and svg_simple/, not inside either.
     SUBDIR = "simple_plots"
+
+    #: SVG mirror folder, sibling of SUBDIR.  The base class mirrors SVGs to
+    #: <out_dir>/svg/ by default; render_simple() below moves that mirror here
+    #: so the vector tree sits beside the raster tree rather than inside it.
+    SVG_SUBDIR = "svg_simple"
 
     def _frame(self, title, subtitle, caption, **kw):
         # Title only. _frame reclaims the subtitle and caption bands rather
         # than leaving white space where the text used to be.
-        #
-        # self._title is still applied: a pooled-platform figure keeps that
-        # warning even here, because the caption that would otherwise carry it
-        # is exactly what this mode removes.
         from .plots import _frame as base_frame
 
         return base_frame(self._title(title), "", "", **kw)
@@ -75,13 +83,37 @@ def render_simple(
     regions=None,
     out_dir: Path | None = None,
 ) -> list[Path]:
-    """Render the simple figure set into ``simple_plots/``."""
+    """Render the simple figure set as PNGs and SVGs.
+
+    PNGs land under ``simple_plots/<region>/``; the SVG mirror the base class
+    writes into ``simple_plots/svg/`` is moved to a top-level ``svg_simple/``
+    so the whole vector deck can be grabbed as one directory.
+    """
     out = Path(out_dir) if out_dir else cfg.out_path / SimpleFigureSuite.SUBDIR
     paths = SimpleFigureSuite(cfg, df, regions=regions).render_all(out)
+
+    src = out / "svg"
+    dst = out.parent / SimpleFigureSuite.SVG_SUBDIR
+    if src.exists() and src.resolve() != dst.resolve():
+        if dst.exists():
+            shutil.rmtree(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        rewritten: list[Path] = []
+        for p in paths:
+            try:
+                rewritten.append(dst / p.relative_to(src))
+            except ValueError:
+                rewritten.append(p)
+        paths = rewritten
+        log.info("SVG mirror moved from %s to %s", src, dst)
+
+    n_png = sum(1 for p in paths if p.suffix == ".png")
+    n_svg = sum(1 for p in paths if p.suffix == ".svg")
     log.info(
-        "Simple figures written to %s - these carry no method text, so cite "
-        "manifest.json alongside them",
-        out,
+        "Simple figures: %d PNG in %s, %d SVG in %s - these carry no method "
+        "text, so cite manifest.json alongside them",
+        n_png, out, n_svg, dst,
     )
     return paths
 

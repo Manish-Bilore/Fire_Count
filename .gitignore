@@ -104,3 +104,6 @@ Thumbs.db
 # A stray directory literally named "{src" exists in the tree from a shell
 # typo. Delete it: rm -rf 'firepipe/{src'
 {src/
+
+# --- run logs ---
+*.log

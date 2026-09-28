@@ -2,6 +2,89 @@
 
 All notable changes to firepipe. Versions follow [semantic versioning](https://semver.org).
 
+## [1.3.0] - 2026-09-11
+
+### Added
+- Per-season district × year heatmaps: `12_rabi_district_year_heatmap` and
+  `12_kharif_district_year_heatmap` alongside the pooled `12`. Each ranks its
+  top districts and sets its colour scale on its own season, because the
+  pooled figure is dominated by the larger season - on the UP S-NPP+MODIS run,
+  7 of Kharif's top 15 districts do not appear in the pooled top 15, and the
+  peak cell differs fourfold (Rabi 3,646 vs Kharif 912).
+- Season-year columns whose window has not closed by the end of the record are
+  marked `*`, with the reason in the caption. Controlled by the existing
+  `plots.partial_year_titles`.
+
+### Changed
+- Figure `12` now shares the heatmap drawing helper added in 1.2.0. Its colour
+  scale therefore starts at 0 rather than at the smallest cell; cell values,
+  row order and layout are unchanged.
+
+## [1.2.2] - 2026-09-11
+
+### Added
+- `plots.partial_year_titles` (default `true`). Set `false` to drop
+  `(record ends <date>)` from the titles of figures 14-19. The flag is inferred
+  from the last detection, so it mislabelled Rabi 2026 as partial: FIRMS holds
+  the full window, and 29-30 Jun simply had no detections after filtering.
+  The caption NOTE in full figures is unchanged.
+
+## [1.2.1] - 2026-09-11
+
+### Fixed
+- **Days lost at the Standard Processing -> NRT boundary.** Each fetch block
+  was routed by its first day, so a block straddling the end of the SP
+  archive requested SP for days SP does not hold. FIRMS answers that with an
+  empty table, not an error, so those days disappeared without a warning. In
+  the up_snpp_modis run (archive state of 19 Aug 2026) this removed
+  **28-29 Apr 2026 from VIIRS S-NPP and 1-4 May 2026 from MODIS**, at the
+  Rabi peak. Blocks are now split wherever the covering dataset changes.
+  **Any 2026 figure or number produced before 1.2.1 should be re-pulled.**
+  Blocks that do not straddle a boundary are requested whole, as before, so
+  existing cache entries remain valid; only the split blocks are new requests.
+- `cmap.set_bad` replaced with `with_extremes(bad=...)` (matplotlib
+  PendingDeprecationWarning).
+
+## [1.2.0] - 2026-09-11
+
+### Added
+- Per-year figure families. Each renders a faceted figure and one file per
+  year, written to a subfolder named after the facet:
+  - `14` district map by season year; `15` the same per season.
+  - `16` weekly bars by season year; `17` the same per season.
+  - `18` district × month heatmap per season year; `19` district × week
+    heatmap per season year, per season (individual files only).
+- Individual files use the colour scale or y-axis of their facet, so a deck
+  of single-year slides is as comparable as the facet it came from.
+- `plots.date_markers`: dashed vertical lines on calendar-date axes, default
+  1 Apr, 1 Jun, 15 Oct and 15 Dec. Plain `MM-DD` strings or `{date, label}`.
+  A marker outside a figure's window is not drawn, and each drawn marker is
+  also a bold tick label.
+- `plots.district_map_metric`: `density` (per 1,000 km², default) or `count`
+  for figures 14 and 15. Figure 13 is unchanged and still shows both.
+- A season year whose record stops inside its window is named in panel and
+  figure titles, e.g. `2026 (record ends 28 Jun)`. The caption already said so,
+  but the simple figures have no caption.
+
+### Changed
+- **Figures 05 (pentad) and 06 (cumulative) now use a calendar-date x-axis**
+  ("1 Oct", "15 Oct") instead of days since the window opened. Bins and curves
+  are computed exactly as before. Pentad points now sit at the centre of the
+  days each bin covers rather than at its first day, and the caption names the
+  length of a short final bin (Kharif: 2 days), whose low value previously read
+  as an end-of-season decline.
+- `Config.fingerprint` no longer hashes `plots`. Figure settings change no
+  detection, and hashing them made every new plot option trip the out_dir
+  overwrite warning on a plain re-run. Fingerprints in existing manifests will
+  differ once; the analysis they describe does not.
+
+### Notes
+- Heatmap cells and weekly bars after the record ends are blank or absent, not
+  zero. Figure `04b` predates this and still shows zeros for unobserved months
+  of a partial final year.
+- Marker lines are drawn as a `LineCollection`, not `axvline`, so data series
+  remain the only `Line2D` artists and the one-line-per-year tests still hold.
+
 ## [1.1.0] - 2026-08-19
 
 ### Added

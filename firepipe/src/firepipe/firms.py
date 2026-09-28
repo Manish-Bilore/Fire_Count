@@ -236,6 +236,41 @@ class FirmsClient:
                 return cand
         return None
 
+    def route_block(
+        self, platform: str, r: DateRange, sensors: SensorConfig
+    ) -> list[tuple[date, int, str | None]]:
+        """Split a block wherever the covering dataset changes.
+
+        Routing a whole block by its first day asks SP for days past the end of
+        the SP archive, and FIRMS answers those with an empty table rather than
+        an error - so the days vanish silently. Seen in practice: a 25-29 Apr
+        block went to VIIRS_SNPP_SP (archive ends 27 Apr) and lost 28-29 Apr.
+
+        A block whose first and last days share a source is returned whole, so
+        its cache key, and every block already cached, is unchanged.
+        """
+        last = r.start + timedelta(days=r.n_days - 1)
+        first_src = self.resolve_source(platform, r.start, sensors)
+        if first_src is not None and first_src == self.resolve_source(platform, last, sensors):
+            return [(r.start, r.n_days, first_src)]
+
+        pieces: list[tuple[date, int, str | None]] = []
+        for i in range(r.n_days):
+            day = r.start + timedelta(days=i)
+            src = self.resolve_source(platform, day, sensors)
+            if pieces and pieces[-1][2] == src:
+                start, n, _ = pieces[-1]
+                pieces[-1] = (start, n + 1, src)
+            else:
+                pieces.append((day, 1, src))
+        if len(pieces) > 1:
+            log.info(
+                "%s: block %s +%dd straddles a dataset boundary; fetching as %s",
+                platform, r.start, r.n_days,
+                ", ".join(f"{src or 'none'} {s:%m-%d}+{n}d" for s, n, src in pieces),
+            )
+        return pieces
+
     # -- fetching ----------------------------------------------------------
 
     def fetch_block(
@@ -319,14 +354,14 @@ class FirmsClient:
         for platform in sensors.platforms:
             for r in ranges:
                 done += 1
-                source = self.resolve_source(platform, r.start, sensors)
-                if source is None:
-                    skipped[platform] = skipped.get(platform, 0) + 1
-                    continue
-                block = self.fetch_block(source, bbox, r.start, r.n_days)
-                if not block.empty:
-                    block["platform_group"] = platform
-                    frames.append(block)
+                for start, n_days, source in self.route_block(platform, r, sensors):
+                    if source is None:
+                        skipped[platform] = skipped.get(platform, 0) + 1
+                        continue
+                    block = self.fetch_block(source, bbox, start, n_days)
+                    if not block.empty:
+                        block["platform_group"] = platform
+                        frames.append(block)
                 if progress and done % 25 == 0:
                     log.info(
                         "  fetched %d/%d blocks (%d rows, %d cached)",

@@ -191,7 +191,7 @@ output/
 │   ├── qc_land_cover.csv
 │   └── qc_confidence_composition.csv
 └── figs/
-    ├── <region>/                # 18 figures per region
+    ├── <region>/                # figures per region; per-year files in subfolders
     └── _comparison/             # cross-region figures
 ```
 
@@ -212,7 +212,37 @@ Per region: `01` yearly counts · `02` season × year · `03` season share ·
 `04`/`04b` monthly panels and month × year heatmap · `05` 5-day bins per season ·
 `06` cumulative curves per season · `07` FRP load · `08` MODIS vs VIIRS
 cross-check · `09`/`10` season-isolated deck figures · `11` top districts ·
-`12` district × year heatmap · `13` district choropleth (counts and per-1,000 km²).
+`12` district × year heatmap, pooled and one per season · `13` district
+choropleth (counts and per-1,000 km²).
+
+Figure `12` writes `12_district_year_heatmap`, `12_rabi_district_year_heatmap`
+and `12_kharif_district_year_heatmap`. Each per-season figure ranks its rows and
+sets its colour scale on that season alone, so its rows and colours deliberately
+do not match the pooled version: the seasons have different hotspots and differ
+severalfold in magnitude. A season year whose window has not closed by the end
+of the record is marked `*` on the axis (suppress with
+`plots.partial_year_titles: false`).
+
+Per-year families - each writes a faceted figure plus one file per year into a
+subfolder of the same name, drawn on the facet's colour scale or y-axis so the
+single-year files stay comparable:
+
+| id | figure | faceted | individual |
+|----|--------|:-------:|:----------:|
+| `14` | district map by season year | ✓ | ✓ |
+| `15` | district map by year, one set per season | ✓ | ✓ |
+| `16` | weekly bars by season year (all seasons on one date axis) | ✓ | ✓ |
+| `17` | weekly bars by year, one set per season | ✓ | ✓ |
+| `18` | district × month heatmap per season year | | ✓ |
+| `19` | district × week heatmap per year, one set per season | | ✓ |
+
+Maps show `plots.district_map_metric` (`density`, per 1,000 km², default; or
+`count`). Heatmap rows are the top `top_n_districts` over the full record, in the
+same order every year. Weekly bins are 7 days from each window's opening; the
+last bin of a window is shorter and drawn narrower. Months and weeks after the
+record ends are left blank in heatmaps and absent from bar charts, never zero.
+A year whose record stops inside its window is named in the title, e.g.
+`2026 (record ends 28 Jun)`, so the warning survives in `simple` mode.
 
 Cross-region: `20` totals by state · `21` normalised trend index · `22` seasonal
 balance grid.
@@ -238,8 +268,18 @@ they no longer describe their own filter, so quote the method statement from
 Both sets are written from the same figure code; `plots_simple` overrides only
 the presentation hooks.
 
-Cumulative curves are plotted against days-since-window-opening rather than day
-of year, so they contain no flat gaps over excluded months. A final year whose
+Figures `05`, `06`, `16`, `17` and `19` use a calendar-date axis ("1 Apr",
+"15 Oct") with every season year overlaid on one reference year. Dashed lines
+mark `plots.date_markers` (default 1 Apr, 1 Jun, 15 Oct, 15 Dec), each drawn
+only where it falls inside the plotted window and always labelled on the axis:
+
+```yaml
+plots:
+  date_markers: ["04-01", "06-01", "10-15", {date: "12-15", label: "end of peak"}]
+```
+
+Cumulative curves and 5-day bins are measured from the window opening, so they
+contain no flat gaps over excluded months. A final year whose
 record stops before the season window closes is flagged automatically:
 
 > NOTE: the 2025 record ends 30 Nov 2025, before the season window closes —

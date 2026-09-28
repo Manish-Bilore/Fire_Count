@@ -244,6 +244,30 @@ class MaskConfig(BaseModel):
 # --------------------------------------------------------------------------
 
 
+class DateMarker(BaseModel):
+    """A calendar date drawn as a dashed vertical line on date-axis figures."""
+
+    date: str = Field(description="'MM-DD', e.g. '10-15'")
+    label: str | None = Field(
+        default=None, description="Optional text beside the line; the date itself is always a tick"
+    )
+
+    @field_validator("date")
+    @classmethod
+    def _check_md(cls, v: str) -> str:
+        try:
+            m, d = v.split("-")
+            date(2000, int(m), int(d))
+        except Exception as exc:
+            raise ValueError(f"date marker '{v}' is not a valid MM-DD anchor") from exc
+        return v
+
+    @property
+    def md(self) -> tuple[int, int]:
+        m, d = self.date.split("-")
+        return int(m), int(d)
+
+
 class PlotConfig(BaseModel):
     enabled: bool = True
     dpi: int = 200
@@ -262,6 +286,78 @@ class PlotConfig(BaseModel):
     annotate_covid: bool = False
     covid_year: int = 2020
     top_n_districts: int = 15
+    date_markers: list[DateMarker] = Field(
+        default=[
+            DateMarker(date="04-01"),
+            DateMarker(date="06-01"),
+            DateMarker(date="10-15"),
+            DateMarker(date="12-15"),
+        ],
+        description=(
+            "Dashed vertical lines on every calendar-date axis (figures 05, 06, "
+            "16, 17, 19). Plain 'MM-DD' strings or {date, label} objects. A "
+            "marker is drawn only where it falls inside the plotted window. "
+            "Set [] for none."
+        ),
+    )
+    district_map_metric: Literal["density", "count"] = Field(
+        default="density",
+        description=(
+            "Quantity mapped by the per-year district maps (14, 15): detections "
+            "per 1,000 km2 of district area, or raw detections. Figure 13 always "
+            "shows both."
+        ),
+    )
+    district_map_style: Literal["discrete", "continuous"] = Field(
+        default="discrete",
+        description=(
+            "Colour scale of the per-year district maps (14, 15). 'discrete' "
+            "draws equal-width classes from 0 to the rounded maximum; "
+            "'continuous' draws a smooth ramp over the same range."
+        ),
+    )
+    district_map_round: int = Field(
+        default=500,
+        gt=0,
+        description=(
+            "The top of the colour scale is the maximum value rounded up to the "
+            "next multiple of this (e.g. 1,083 -> 1,500). The bottom is always 0."
+        ),
+    )
+    district_map_classes: int = Field(
+        default=10,
+        ge=2,
+        le=20,
+        description="Number of equal-width colour classes when district_map_style is 'discrete'.",
+    )
+    district_map_scales: list[Literal["global", "local"]] = Field(
+        default=["global", "local"],
+        min_length=1,
+        description=(
+            "Scales rendered for the individual per-year maps. 'global' shares "
+            "one scale across every year of the family (comparable between "
+            "years); 'local' rescales to each year's own maximum (shows the "
+            "spatial pattern within the year). Each goes to its own subfolder. "
+            "The faceted overview always uses the global scale."
+        ),
+    )
+    partial_year_titles: bool = Field(
+        default=True,
+        description=(
+            "Append '(record ends <date>)' to year labels in titles of figures "
+            "14-19 when the last detection falls before the window closes. The "
+            "test uses the last detection, not the fetched coverage, so it can "
+            "flag a complete season whose final days had no detections. The "
+            "caption NOTE in full figures is unaffected."
+        ),
+    )
+
+    @field_validator("date_markers", mode="before")
+    @classmethod
+    def _markers_from_strings(cls, v):
+        if v is None:
+            return []
+        return [{"date": m} if isinstance(m, str) else m for m in v]
 
 
 class FirmsConfig(BaseModel):
@@ -385,6 +481,10 @@ class Config(BaseModel):
         """Short stable hash of the analytical settings, for provenance."""
         payload: dict[str, Any] = json.loads(self.model_dump_json())
         payload.pop("out_dir", None)
+        # Figure settings do not change a single detection. Hashing them made
+        # every new plot option look like a different analysis and tripped
+        # the out_dir overwrite warning on a plain re-run.
+        payload.pop("plots", None)
         payload.get("firms", {}).pop("map_key", None)
         blob = json.dumps(payload, sort_keys=True).encode()
         return hashlib.sha256(blob).hexdigest()[:12]

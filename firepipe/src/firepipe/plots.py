@@ -36,6 +36,17 @@ REGION_PALETTE = ["#EE3B33", "#3B6EA5", "#F0A202", "#4C9A2A", "#7B4397", "#00838
 
 MONTH_ABB = list(calendar.month_abbr)[1:]
 
+#: Calendar-date axes place every season year on one reference year so years
+#: overlay. 2000 is a leap year, so a 29 Feb anchor still has a date.
+REF_YEAR = 2000
+WEEK = 7
+MARKER_COLOUR = "#333333"
+
+#: Name of the single top-level folder that holds the SVG mirror of the whole
+#: deck.  Kept beside the per-region raster folders rather than inside them, so
+#: the vector art can be grabbed (or shipped) as one directory.
+SVG_DIRNAME = "svg"
+
 _PLATFORM_WORDS = {
     "VIIRS_SNPP": "S-NPP",
     "VIIRS_NOAA20": "NOAA-20",
@@ -176,18 +187,46 @@ def _class_words(classes: list[str]) -> str:
 
 
 class FigureWriter:
-    def __init__(self, out_dir: Path, dpi: int = 200, formats: list[str] | None = None):
+    """Collects rendered figures and mirrors every one as SVG.
+
+    Rasters land in ``out_dir``; an SVG copy of each figure lands under
+    ``svg_root`` at the same relative name.  Passing ``svg_root`` per writer
+    (rather than deriving it from ``out_dir``) is what lets the whole SVG tree
+    live in one folder beside the region folders instead of scattering a
+    ``svg/`` into each of them.  Both copies are written from the same Figure
+    before it is closed, so the two trees cannot drift apart.
+
+    Set ``svg_root=None`` to suppress the SVG mirror entirely (useful for tests
+    and throwaway runs).
+    """
+
+    def __init__(
+        self,
+        out_dir: Path,
+        dpi: int = 200,
+        formats: list[str] | None = None,
+        svg_root: Path | None = None,
+    ):
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.dpi = dpi
         self.formats = formats or ["png"]
+        self.svg_root = Path(svg_root) if svg_root is not None else None
         self.written: list[Path] = []
 
     def save(self, fig: plt.Figure, name: str) -> None:
         for ext in self.formats:
             path = self.out_dir / f"{name}.{ext}"
+            path.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(path, dpi=self.dpi, bbox_inches="tight", facecolor="white")
             self.written.append(path)
+        if self.svg_root is not None:
+            # ``name`` may carry a sub-path (the per-year heatmap families do),
+            # so the parent has to be created exactly as above.
+            svg = self.svg_root / f"{name}.svg"
+            svg.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(svg, bbox_inches="tight", facecolor="white")
+            self.written.append(svg)
         plt.close(fig)
 
 
@@ -340,10 +379,16 @@ class FigureSuite:
         written: list[Path] = []
         wanted = self.cfg.plots.figures
         pick = (lambda fid: True) if "all" in wanted else (lambda fid: fid in wanted)
+        # One SVG tree for the whole deck, sitting beside the region folders.
+        svg_root = Path(out_dir) / SVG_DIRNAME
 
         for region, sub in self.df.groupby("region", observed=True):
+            slug = _slug(str(region))
             w = FigureWriter(
-                Path(out_dir) / _slug(str(region)), self.cfg.plots.dpi, self.cfg.plots.formats
+                Path(out_dir) / slug,
+                self.cfg.plots.dpi,
+                self.cfg.plots.formats,
+                svg_root=svg_root / slug,
             )
             raw_sub = self.all[self.all["region"] == region]
             label = str(region)
@@ -375,11 +420,26 @@ class FigureSuite:
                 self.f12_district_heatmap(sub, label, w)
             if pick("13"):
                 self.f13_district_map(sub, label, w)
+            if pick("14"):
+                self.f14_district_map_by_year(sub, label, w)
+            if pick("15"):
+                self.f15_season_district_map_by_year(sub, label, w)
+            if pick("16"):
+                self.f16_weekly_by_year(sub, label, w)
+            if pick("17"):
+                self.f17_season_weekly_by_year(sub, label, w)
+            if pick("18"):
+                self.f18_district_month_heatmap_by_year(sub, label, w)
+            if pick("19"):
+                self.f19_season_district_week_heatmap_by_year(sub, label, w)
             written += w.written
 
         if len(self.df["region"].unique()) > 1:
             w = FigureWriter(
-                Path(out_dir) / "_comparison", self.cfg.plots.dpi, self.cfg.plots.formats
+                Path(out_dir) / "_comparison",
+                self.cfg.plots.dpi,
+                self.cfg.plots.formats,
+                svg_root=svg_root / "_comparison",
             )
             if pick("20"):
                 self.f20_region_totals(w)
@@ -596,9 +656,10 @@ class FigureSuite:
             if d.empty:
                 continue
             win = self._detail_window(season)
+            span = _window_span_days(win)
             offs = _day_offset(d, win)
             d = d.assign(day_off=offs)
-            d = d[d["day_off"].between(0, _window_span_days(win))]
+            d = d[d["day_off"].between(0, span)]
             d["bin"] = (d["day_off"] // 5 * 5).astype(int)
             binned = (
                 d.groupby(["season_year", "bin"], observed=True)
@@ -606,11 +667,23 @@ class FigureSuite:
                 .rename("fires")
                 .reset_index()
             )
+            # Each point sits at the centre of the days its bin covers. The
+            # last bin of a window can be shorter than five days.
+            blen = np.minimum(5, span + 1 - binned["bin"])
+            binned["x"] = mdates.date2num(_ref_start(win)) + binned["bin"] + blen / 2
+            start, stop = _ref_window(win, span)
+            tail = (span + 1) % 5
             cap = self.cap.block(
                 sub,
                 f"Five-day bins measured from the {season} window opening "
-                f"({win.start} \u2192 {win.end})",
+                f"({win.start} \u2192 {win.end}); each point is plotted at the centre "
+                "of its bin",
+                (
+                    f"The final bin covers only {_n_days(tail)}, "
+                    "so its low value is not a decline"
+                ) if tail else "",
                 "Peak timing, not peak height, is the comparable quantity across years",
+                self._marker_note(start, stop),
             )
             fig, ax = self._frame(
                 f"{season} Burning Window, 5-Day Intervals: {region}",
@@ -625,7 +698,7 @@ class FigureSuite:
             for i, yr in enumerate(years):
                 dd = binned[binned["season_year"] == yr].sort_values("bin")
                 ax.plot(
-                    dd["bin"],
+                    dd["x"],
                     dd["fires"],
                     marker="o",
                     ms=4,
@@ -633,9 +706,11 @@ class FigureSuite:
                     label=str(int(yr)),
                     color=cmap(0.25 + 0.7 * i / max(len(years) - 1, 1)),
                 )
-            ax.set_xlabel(f"Days since {_md_words(win.start)}")
+            ax.set_xlabel("Date (5-day bins)")
             ax.set_ylabel("Fire count")
             ax.yaxis.set_major_formatter(COMMA)
+            self._calendar_axis(ax, start, stop)
+            self._mark_dates(ax, start, stop)
             _legend(ax, title="Season year", ncol=max(1, min(len(years), 4)), loc="upper left")
             self._headroom(ax, 1.35)
             w.save(fig, f"05_{_slug(season)}_pentad")
@@ -646,8 +721,10 @@ class FigureSuite:
             if d.empty:
                 continue
             win = self._detail_window(season)
+            span = _window_span_days(win)
+            start, stop = _ref_window(win, span)
             d = d.assign(day_off=_day_offset(d, win))
-            d = d[d["day_off"].between(0, _window_span_days(win))]
+            d = d[d["day_off"].between(0, span)]
             cum = (
                 d.groupby(["season_year", "day_off"], observed=True)
                 .size()
@@ -661,6 +738,7 @@ class FigureSuite:
                 "Curves are cumulative within the season window; a steeper rise means "
                 "burning compressed into fewer days",
                 "Curves are restricted to in-season days, so they have no flat gaps",
+                self._marker_note(start, stop),
             )
             fig, ax = self._frame(
                 f"Cumulative {season} Detections, {region}",
@@ -673,15 +751,17 @@ class FigureSuite:
             for i, yr in enumerate(years):
                 dd = cum[cum["season_year"] == yr]
                 ax.plot(
-                    dd["day_off"],
+                    mdates.date2num(start) + dd["day_off"],
                     dd["cum"],
                     lw=2.2,
                     label=str(int(yr)),
                     color=cmap(0.25 + 0.7 * i / max(len(years) - 1, 1)),
                 )
-            ax.set_xlabel(f"Days since {_md_words(win.start)}")
+            ax.set_xlabel("Date")
             ax.set_ylabel("Cumulative detections")
             ax.yaxis.set_major_formatter(COMMA)
+            self._calendar_axis(ax, start, stop)
+            self._mark_dates(ax, start, stop)
             _legend(ax, title="Season year", ncol=max(1, min(len(years), 2)), loc="upper left")
             self._headroom(ax, 1.15)
             w.save(fig, f"06_{_slug(season)}_cumulative")
@@ -900,45 +980,81 @@ class FigureSuite:
         w.save(fig, "11_districts_top")
 
     def f12_district_heatmap(self, sub, region, w):
+        """District x season year, once over all seasons and once per season.
+
+        The per-season figures are not slices of the combined one: each ranks
+        and scales on its own season, because the seasons have different
+        hotspots and differ severalfold in magnitude, so Kharif's geography is
+        washed out on a Rabi-dominated scale.
+        """
         if "admin_unit" not in sub or sub["admin_unit"].isna().all():
             return
+        self._district_year_heatmap(
+            sub, sub, region, w, "12_district_year_heatmap",
+            f"District \u00d7 Year Detections, {region}",
+            self.cap.sub_tag,
+            ["Season windows are pooled, so a year's column mixes them"],
+        )
+        for season in self.cal.names:
+            d = sub[sub["season"] == season]
+            if d.empty:
+                continue
+            win = self.cal.window(season)
+            self._district_year_heatmap(
+                sub, d, region, w, f"12_{_slug(season)}_district_year_heatmap",
+                f"{season} District \u00d7 Year Detections, {region}",
+                f"{win.display_label} \u2014 {self.cap.sub_tag}",
+                [
+                    f"{season} window only: {_md_words(win.start)} to {_md_words(win.end)}",
+                    f"Ranked and scaled on {season} alone, so rows and colours do not "
+                    "match the pooled or other-season version of this figure",
+                ],
+            )
+
+    def _district_year_heatmap(self, sub, d, region, w, name, title, subtitle, notes):
         n = self.cfg.plots.top_n_districts
-        top = sub["admin_unit"].value_counts().head(n).index
-        d = sub[sub["admin_unit"].isin(top)]
+        top = d["admin_unit"].value_counts().head(n).index
         grid = (
-            d.groupby(["admin_unit", "season_year"], observed=True)
+            d[d["admin_unit"].isin(top)]
+            .groupby(["admin_unit", "season_year"], observed=True)
             .size()
             .unstack(fill_value=0)
             .reindex(top)
+            .astype(float)
         )
+        # A season year still running is a short column, not a low one.
+        last = _record_end(sub)
+        wins = [self.cal.window(s) for s in self.cal.names] if d is sub else [
+            self.cal.window(str(d["season"].iloc[0]))
+        ]
+        partial = [
+            int(y) for y in grid.columns
+            if self.cfg.plots.partial_year_titles
+            and last < max(_window_end(win, int(y)) for win in wins)
+        ]
         cap = self.cap.block(
             sub,
-            "Rows ordered by total detections; a row that brightens over time is a "
-            "district where burning intensified",
+            *notes,
+            f"Rows: top {len(grid)} districts by total detections; a row that "
+            "brightens over time is a district where burning intensified",
+            (
+                f"{_join_words([str(y) for y in partial])} "
+                f"{'is' if len(partial) == 1 else 'are'} marked * : the record ends "
+                f"{_day_words(last)} {last.year}, inside the window, so the column is "
+                "short, not low"
+            ) if partial else "",
         )
         fig, ax = self._frame(
-            f"District \u00d7 Year Detections, {region}",
-            f"Top {len(grid)} districts \u2014 {self.cap.sub_tag}",
-            cap,
-            width=14,
-            height=0.42 * len(grid) + 3,
+            title, f"Top {len(grid)} districts \u2014 {subtitle}", cap,
+            width=14, height=0.42 * len(grid) + 3,
         )
         ax = ax[0][0]
-        vals = grid.to_numpy()
-        im = ax.imshow(vals, cmap="YlOrRd", aspect="auto")
-        cut = 0.55 * np.nanmax(vals) if vals.size else 0
-        for i in range(vals.shape[0]):
-            for j in range(vals.shape[1]):
-                ax.text(
-                    j, i, _comma(vals[i, j]), ha="center", va="center", fontsize=9,
-                    fontweight="bold", color="white" if vals[i, j] > cut else "#262626",
-                )
-        ax.set_xticks(range(grid.shape[1]), [str(int(c)) for c in grid.columns])
-        ax.set_yticks(range(len(grid)), [str(v).title() for v in grid.index])
+        self._district_heatmap(
+            ax, fig, grid, float(np.nanmax(grid.to_numpy())) if grid.size else 1.0,
+            [f"{int(c)}*" if int(c) in partial else str(int(c)) for c in grid.columns],
+        )
         ax.set_xlabel("Season year")
-        ax.grid(False)
-        fig.colorbar(im, ax=ax, shrink=0.8, label="Detections")
-        w.save(fig, "12_district_year_heatmap")
+        w.save(fig, name)
 
     def f13_district_map(self, sub, region, w):
         reg = next((r for r in self.regions if r.name == region), None)
@@ -979,6 +1095,498 @@ class FigureSuite:
             ax.set_axis_off()
             ax.grid(False)
         w.save(fig, "13_district_map")
+
+    # -- per-year / per-season families (14-19) ---------------------------
+    #
+    # Each family renders one faceted figure plus one file per panel. The
+    # individual files reuse the facet's colour scale or y-axis, so a deck of
+    # single-year slides stays as comparable as the facet it was cut from.
+    # Individual files go in a subfolder named after the facet.
+
+    def f14_district_map_by_year(self, sub, region, w):
+        years = sorted(int(y) for y in sub["season_year"].unique())
+        groups = [
+            (y, sub[sub["season_year"] == y], self._year_label(sub, y)) for y in years
+        ]
+        self._map_family(
+            sub, region, w, groups,
+            facet_name="14_district_map_by_year",
+            indiv_stem="14_district_map",
+            facet_title=f"District Fire Detections by Year, {region}",
+            indiv_title=lambda lab: f"District Fire Detections, {region}: {lab}",
+            notes=["Season years combine every season window"],
+        )
+
+    def f15_season_district_map_by_year(self, sub, region, w):
+        for season in self.cal.names:
+            d = sub[sub["season"] == season]
+            if d.empty:
+                continue
+            years = sorted(int(y) for y in d["season_year"].unique())
+            groups = [
+                (y, d[d["season_year"] == y], self._year_label(sub, y, season))
+                for y in years
+            ]
+            slug = _slug(season)
+            self._map_family(
+                sub, region, w, groups,
+                facet_name=f"15_{slug}_district_map_by_year",
+                indiv_stem=f"15_{slug}_district_map",
+                facet_title=f"{season} District Fire Detections by Year, {region}",
+                indiv_title=lambda lab, s=season: f"{s} District Fire Detections, {region}: {lab}",
+                notes=[
+                    f"{season} window only: {_md_words(self.cal.window(season).start)} "
+                    f"to {_md_words(self.cal.window(season).end)}"
+                ],
+            )
+
+    def f16_weekly_by_year(self, sub, region, w):
+        wins = [win for win in self.cal.windows if (sub["season"] == win.name).any()]
+        if not wins:
+            return
+        years = sorted(int(y) for y in sub["season_year"].unique())
+        start = min(_ref_start(win) for win in wins)
+        stop = max(_ref_window(win, _window_span_days(win))[1] for win in wins)
+        self._weekly_family(
+            sub, region, w, wins, years, start, stop,
+            facet_name="16_weekly_by_year",
+            indiv_stem="16_weekly",
+            facet_title=f"Weekly Fire Detections by Year, {region}",
+            indiv_title=lambda y, lab: f"Weekly Fire Detections, {region}: {lab}",
+            label_of=lambda y: self._year_label(sub, y),
+        )
+
+    def f17_season_weekly_by_year(self, sub, region, w):
+        for win in self.cal.windows:
+            d = sub[sub["season"] == win.name]
+            if d.empty:
+                continue
+            years = sorted(int(y) for y in d["season_year"].unique())
+            start, stop = _ref_window(win, _window_span_days(win))
+            slug = _slug(win.name)
+            self._weekly_family(
+                sub, region, w, [win], years, start, stop,
+                facet_name=f"17_{slug}_weekly_by_year",
+                indiv_stem=f"17_{slug}_weekly",
+                facet_title=f"Weekly {win.name} Fire Detections by Year, {region}",
+                indiv_title=lambda y, lab, s=win.name: f"Weekly {s} Fire Detections, {region}: {lab}",
+                label_of=lambda y, s=win.name: self._year_label(sub, y, s),
+            )
+
+    def f18_district_month_heatmap_by_year(self, sub, region, w):
+        if "admin_unit" not in sub or sub["admin_unit"].isna().all():
+            return
+        n = self.cfg.plots.top_n_districts
+        top = sub["admin_unit"].value_counts().head(n).index
+        months = self.cal.covered_months()
+        last = _record_end(sub)
+        years = sorted(int(y) for y in sub["season_year"].unique())
+
+        grids = {}
+        for y in years:
+            d = sub[(sub["season_year"] == y) & sub["admin_unit"].isin(top)]
+            g = (
+                d.groupby(["admin_unit", "month"], observed=True)
+                .size()
+                .unstack(fill_value=0)
+                .reindex(index=top, columns=months, fill_value=0)
+                .astype(float)
+            )
+            for m in months:
+                if self._month_start(y, m) > last:
+                    g[m] = np.nan  # not yet observed: blank, not zero
+            grids[y] = g
+        vmax = max((np.nanmax(g.to_numpy()) for g in grids.values() if g.notna().any().any()), default=1.0) or 1.0
+
+        cap = self.cap.block(
+            sub,
+            f"Rows: top {len(top)} districts over the full record, in the same order in "
+            "every year so rows line up across files",
+            f"Colour scale fixed at 0\u2013{vmax:,.0f} across all years",
+            "Blank cells are months after the record ends, not zero detections"
+            if any(g.isna().any().any() for g in grids.values()) else "",
+        )
+        for y in years:
+            lab = self._year_label(sub, y)
+            g = grids[y]
+            fig, ax = self._frame(
+                f"District \u00d7 Month Detections, {region}: {lab}",
+                f"Top {len(g)} districts \u2014 {self.cap.sub_tag}",
+                cap,
+                width=14,
+                height=0.42 * len(g) + 3,
+            )
+            ax = ax[0][0]
+            self._district_heatmap(ax, fig, g, vmax, [MONTH_ABB[m - 1] for m in months])
+            ax.set_xlabel("Month")
+            w.save(
+                fig,
+                f"18_district_month_heatmap_by_year/18_district_month_heatmap_{y}",
+            )
+
+    def f19_season_district_week_heatmap_by_year(self, sub, region, w):
+        if "admin_unit" not in sub or sub["admin_unit"].isna().all():
+            return
+        n = self.cfg.plots.top_n_districts
+        last = _record_end(sub)
+        for win in self.cal.windows:
+            d = sub[sub["season"] == win.name]
+            if d.empty:
+                continue
+            top = d["admin_unit"].value_counts().head(n).index
+            span = _window_span_days(win)
+            edges = _bin_edges(span, WEEK)
+            bins = [b for b, _ in edges]
+            ref0 = _ref_start(win)
+            years = sorted(int(y) for y in d["season_year"].unique())
+            dt = d[d["admin_unit"].isin(top)]
+            dt = dt.assign(day_off=_day_offset(dt, win))
+            dt = dt[dt["day_off"].between(0, span)]
+            dt = dt.assign(bin=(dt["day_off"] // WEEK * WEEK).astype(int))
+
+            grids = {}
+            for y in years:
+                g = (
+                    dt[dt["season_year"] == y]
+                    .groupby(["admin_unit", "bin"], observed=True)
+                    .size()
+                    .unstack(fill_value=0)
+                    .reindex(index=top, columns=bins, fill_value=0)
+                    .astype(float)
+                )
+                opened = _window_start(win, y)
+                for b in bins:
+                    if opened + pd.Timedelta(days=b) > last:
+                        g[b] = np.nan
+                grids[y] = g
+            vmax = max((np.nanmax(g.to_numpy()) for g in grids.values() if g.notna().any().any()), default=1.0) or 1.0
+
+            xlabels = []
+            for b, blen in edges:
+                t = ref0 + pd.Timedelta(days=b)
+                xlabels.append(_day_words(t) + (f"\n({blen} d)" if blen < WEEK else ""))
+            stop = ref0 + pd.Timedelta(days=span + 1)
+            short = [blen for _, blen in edges if blen < WEEK]
+            cap = self.cap.block(
+                sub,
+                f"Rows: top {len(top)} {win.name} districts over the full record, fixed "
+                "across years; columns: 7-day bins from the window opening, labelled "
+                "by their first day",
+                f"The final column covers only {_n_days(short[0])}" if short else "",
+                f"Colour scale fixed at 0\u2013{vmax:,.0f} across all {win.name} years",
+                "Blank cells are weeks after the record ends, not zero detections"
+                if any(g.isna().any().any() for g in grids.values()) else "",
+                self._marker_note(ref0, stop),
+            )
+            slug = _slug(win.name)
+            for y in years:
+                g = grids[y]
+                fig, ax = self._frame(
+                    f"{win.name} District \u00d7 Week Detections, {region}: "
+                    f"{self._year_label(sub, y, win.name)}",
+                    f"Top {len(g)} districts \u2014 {win.display_label} \u2014 {self.cap.sub_tag}",
+                    cap,
+                    width=16,
+                    height=0.42 * len(g) + 3,
+                )
+                ax = ax[0][0]
+                self._district_heatmap(
+                    ax, fig, g, vmax, xlabels, fontsize=8 if len(bins) > 12 else 9,
+                    rotate=True,
+                )
+                # Column k spans days [7k, 7k + 7): a date d days in sits at d/7 - 0.5.
+                for t, label in self._marker_dates_in(ref0, stop):
+                    x = (t - ref0).days / WEEK - 0.5
+                    ax.vlines(x, -0.5, len(g) - 0.5, colors=MARKER_COLOUR,
+                              linestyles=(0, (5, 3)), linewidth=1.4, zorder=2)
+                ax.set_xlabel("Week starting")
+                w.save(
+                    fig,
+                    f"19_{slug}_district_week_heatmap_by_year/"
+                    f"19_{slug}_district_week_heatmap_{y}",
+                )
+
+    # -- family builders ---------------------------------------------------
+
+    def _map_family(
+        self, sub, region, w, groups, *, facet_name, indiv_stem, facet_title,
+        indiv_title, notes,
+    ):
+        """One faceted map plus individual per-year maps on each configured scale.
+
+        Scale top = the maximum rounded up to the next ``district_map_round``
+        (bottom is always 0). 'global' takes the maximum over every year in the
+        family, 'local' over the one year being drawn. The facet is always
+        global: panels that shared a figure but not a scale would invite exactly
+        the comparison they cannot support.
+        """
+        base = self._admin_base(region)
+        if base is None or not groups:
+            return
+        gdf, key = base
+        pc = self.cfg.plots
+        density = pc.district_map_metric == "density"
+        metric = "Detections per 1,000 km\u00b2" if density else "Detections"
+
+        vals = {}
+        for y, d, _ in groups:
+            counts = d.groupby("admin_unit", observed=True).size()
+            v = gdf[key].map(counts).fillna(0).astype(float)
+            vals[y] = v / gdf["area_km2"] * 1000 if density else v
+        peak = {y: float(np.nanmax(v.to_numpy())) if len(v) else 0.0 for y, v in vals.items()}
+        years = [y for y, _, _ in groups]
+        span = f"{min(years)}\u2013{max(years)}" if len(years) > 1 else str(years[0])
+        g_top = _scale_top(max(peak.values()), pc.district_map_round)
+
+        def scale_note(top, scope):
+            kind = (
+                f"{pc.district_map_classes} equal classes"
+                if pc.district_map_style == "discrete" else "continuous ramp"
+            )
+            return (
+                f"Colour scale 0\u2013{top:,.0f} ({kind}), {scope}; top = maximum "
+                f"rounded up to the next multiple of {pc.district_map_round:,}"
+            )
+
+        head = [
+            *notes,
+            f"Mapped quantity: {metric.lower()}"
+            + (" of total district area, which removes the district-size effect"
+               if density else "; not area-normalised, so larger districts accumulate more"),
+        ]
+        g_scope = f"shared by every year {span}, so years are directly comparable"
+        g_cap = self.cap.block(sub, *head, scale_note(g_top, g_scope))
+        g_label = f"{metric}\nscale: {span}"
+
+        ncols = min(4, len(groups))
+        nrows = int(np.ceil(len(groups) / ncols))
+        fig, axes = self._frame(
+            facet_title,
+            f"{self.cap.sub_tag} \u2014 {metric}",
+            g_cap,
+            width=16,
+            height=nrows * (13.0 / ncols) * _map_aspect(gdf) + 0.35 * nrows,
+            nrows=nrows,
+            ncols=ncols,
+        )
+        fig.subplots_adjust(left=0.02, right=0.88, wspace=0.05, hspace=0.18)
+        flat = [ax for row in axes for ax in row]
+        scale = self._map_scale(g_top)
+        for ax, (y, _, lab) in zip(flat, groups):
+            self._choropleth(ax, gdf, vals[y], scale)
+            ax.set_title(lab, fontweight="bold", fontsize=12)
+        for ax in flat[len(groups):]:
+            ax.axis("off")
+        self._map_colourbar(fig, flat, scale, g_label, shrink=0.6, fraction=0.03)
+        w.save(fig, facet_name)
+
+        for kind in pc.district_map_scales:
+            for y, d, lab in groups:
+                if kind == "global":
+                    top, cap, label = g_top, g_cap, g_label
+                else:
+                    top = _scale_top(peak[y], pc.district_map_round)
+                    cap = self.cap.block(
+                        sub, *head,
+                        scale_note(top, f"fitted to {y} alone; do not compare colours across years"),
+                    )
+                    label = f"{metric}\nscale: {y} only"
+                fig, ax = self._frame(
+                    indiv_title(lab),
+                    f"{self.cap.sub_tag} \u2014 {metric} \u2014 {len(d):,} detections",
+                    cap,
+                    width=12,
+                    height=8,
+                )
+                ax = ax[0][0]
+                scale = self._map_scale(top)
+                self._choropleth(ax, gdf, vals[y], scale)
+                self._map_colourbar(fig, ax, scale, label, shrink=0.7)
+                w.save(fig, f"{facet_name}/{kind}/{indiv_stem}_{y}")
+
+    def _map_scale(self, top: float, cmap: str = "YlOrRd"):
+        """(norm, colormap, tick edges) for a 0..top district map scale."""
+        from matplotlib.colors import BoundaryNorm, Normalize
+
+        pc = self.cfg.plots
+        if pc.district_map_style == "discrete":
+            edges = np.linspace(0.0, top, pc.district_map_classes + 1)
+            cm = plt.get_cmap(cmap, pc.district_map_classes)
+            return BoundaryNorm(edges, cm.N, clip=True), cm, edges
+        return Normalize(0.0, top, clip=True), plt.get_cmap(cmap), np.linspace(0.0, top, 6)
+
+    def _weekly_family(
+        self, sub, region, w, wins, years, start, stop, *, facet_name, indiv_stem,
+        facet_title, indiv_title, label_of,
+    ):
+        last = _record_end(sub)
+        # (year, season) -> list of (x, width, count), observed bins only
+        bars: dict[tuple[int, str], list[tuple[float, int, int]]] = {}
+        for win in wins:
+            d = sub[sub["season"] == win.name]
+            span = _window_span_days(win)
+            d = d.assign(day_off=_day_offset(d, win))
+            d = d[d["day_off"].between(0, span)]
+            counts = (
+                d.assign(bin=(d["day_off"] // WEEK * WEEK).astype(int))
+                .groupby(["season_year", "bin"], observed=True)
+                .size()
+            )
+            ref0 = mdates.date2num(_ref_start(win))
+            for y in years:
+                opened = _window_start(win, y)
+                rows = []
+                for b, blen in _bin_edges(span, WEEK):
+                    if opened + pd.Timedelta(days=b) > last:
+                        break  # no observation yet: draw nothing, not a zero
+                    rows.append((ref0 + b, blen, int(counts.get((y, b), 0))))
+                if rows:
+                    bars[(y, win.name)] = rows
+        if not bars:
+            return
+        ymax = max(c for rows in bars.values() for _, _, c in rows) or 1
+
+        spans = _window_days_text(wins, WEEK)
+        cap = self.cap.block(
+            sub,
+            "Weekly = 7-day bins counted from each window's opening ("
+            + "; ".join(f"{win.name}: {_md_words(win.start)}" for win in wins)
+            + "); each bar spans the dates it covers",
+            (
+                f"The final bin of a window is shorter ({spans}) and drawn narrower: "
+                "its height is not a full week's count"
+            ) if spans else "",
+            "Y-axis fixed across every panel and every individual figure in this set",
+            self._marker_note(start, stop),
+        )
+
+        def draw(ax, y):
+            for win in wins:
+                rows = bars.get((y, win.name))
+                if not rows:
+                    continue
+                xs, ws, cs = zip(*rows)
+                ax.bar(
+                    xs, cs, width=ws, align="edge", color=self.pal[win.name],
+                    edgecolor="white", linewidth=0.6, label=win.name,
+                )
+            ax.set_ylim(0, ymax)
+            ax.yaxis.set_major_formatter(COMMA)
+            ax.grid(axis="x", visible=False)
+
+        ncols = min(4, len(years))
+        nrows = int(np.ceil(len(years) / ncols))
+        fig, axes = self._frame(
+            facet_title,
+            f"{self.cap.sub_tag} \u2014 7-day bins",
+            cap,
+            width=16,
+            height=3.0 * nrows + 1,
+            nrows=nrows,
+            ncols=ncols,
+            sharey=True,
+        )
+        flat = [ax for row in axes for ax in row]
+        for i, (ax, y) in enumerate(zip(flat, years)):
+            draw(ax, y)
+            self._headroom(ax, 1.15)
+            ax.set_title(label_of(y), fontweight="bold", fontsize=12)
+            self._calendar_axis(ax, start, stop)
+            self._mark_dates(ax, start, stop, labels=False)
+            if i % ncols == 0:
+                ax.set_ylabel("Fire count")
+            if i == 0 and len(wins) > 1:
+                _legend(ax, ncol=len(wins), loc="upper left")
+        for ax in flat[len(years):]:
+            ax.axis("off")
+        w.save(fig, facet_name)
+
+        for y in years:
+            if not any((y, win.name) in bars for win in wins):
+                continue
+            total = sum(c for win in wins for _, _, c in bars.get((y, win.name), []))
+            lab = label_of(y)
+            fig, ax = self._frame(
+                indiv_title(y, lab),
+                f"{self.cap.sub_tag} \u2014 7-day bins \u2014 {total:,} detections",
+                cap,
+                width=16,
+                height=7,
+            )
+            ax = ax[0][0]
+            draw(ax, y)
+            self._headroom(ax, 1.22)
+            self._headline_note(ax, f"Total: {total:,} detections")
+            self._calendar_axis(ax, start, stop)
+            self._mark_dates(ax, start, stop)
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Fire count")
+            if len(wins) > 1:
+                _legend(ax, title="Season", ncol=len(wins), loc="upper right")
+            w.save(fig, f"{facet_name}/{indiv_stem}_{y}")
+
+    # -- map and heatmap drawing ---------------------------------------------
+
+    def _admin_base(self, region):
+        reg = next((r for r in self.regions if r.name == region), None)
+        if reg is None or reg.admin is None:
+            return None
+        from .aoi import admin_area_km2
+
+        key = reg.cfg.admin_field
+        areas = admin_area_km2(reg).set_index("admin_unit")["area_km2"]
+        gdf = reg.admin.copy()
+        gdf["area_km2"] = gdf[key].map(areas)
+        return gdf, key
+
+    @staticmethod
+    def _choropleth(ax, gdf, values, scale):
+        norm, cmap, _ = scale
+        gdf.assign(_v=values.to_numpy()).plot(
+            column="_v", ax=ax, cmap=cmap, norm=norm,
+            edgecolor="white", linewidth=0.4,
+        )
+        ax.set_axis_off()
+        ax.grid(False)
+
+    @staticmethod
+    def _map_colourbar(fig, ax, scale, label, shrink=0.7, fraction=0.15):
+        from matplotlib.cm import ScalarMappable
+
+        norm, cmap, edges = scale
+        sm = ScalarMappable(norm=norm, cmap=cmap)
+        cb = fig.colorbar(
+            sm, ax=ax, shrink=shrink, fraction=fraction, label=label,
+            ticks=edges, spacing="proportional",
+        )
+        cb.ax.yaxis.set_major_formatter(COMMA)
+
+    @staticmethod
+    def _district_heatmap(ax, fig, grid, vmax, xlabels, fontsize=9, rotate=False):
+        cmap = plt.get_cmap("YlOrRd").with_extremes(bad="#F2F2F2")
+        vals = grid.to_numpy(dtype=float)
+        im = ax.imshow(
+            np.ma.masked_invalid(vals), cmap=cmap, vmin=0, vmax=vmax, aspect="auto"
+        )
+        cut = 0.55 * vmax
+        for i in range(vals.shape[0]):
+            for j in range(vals.shape[1]):
+                v = vals[i, j]
+                if np.isnan(v):
+                    continue
+                ax.text(
+                    j, i, _comma(v), ha="center", va="center", fontsize=fontsize,
+                    fontweight="bold", color="white" if v > cut else "#262626",
+                )
+        ax.set_xticks(range(vals.shape[1]), xlabels)
+        if rotate:
+            ax.tick_params(axis="x", labelrotation=45, labelsize=9)
+            for t in ax.get_xticklabels():
+                t.set_ha("right")
+        ax.set_yticks(range(len(grid)), [str(v).title() for v in grid.index])
+        ax.grid(False)
+        cb = fig.colorbar(im, ax=ax, shrink=0.8, label="Detections")
+        cb.ax.yaxis.set_major_formatter(COMMA)
 
     # -- cross-region figures ---------------------------------------------
 
@@ -1096,6 +1704,107 @@ class FigureSuite:
             return win
         return win.model_copy(update={"start": dw["start"], "end": dw["end"]})
 
+    # -- calendar-date axes ---------------------------------------------------
+
+    def _year_label(self, sub, season_year, season=None) -> str:
+        """'2026 (record ends 28 Jun)' when the record stops inside the window.
+
+        Goes in the panel or figure title, because the simple figures drop the
+        caption that would otherwise carry the partial-year warning.
+        """
+        label = str(int(season_year))
+        if sub.empty or not self.cfg.plots.partial_year_titles:
+            return label
+        last = _record_end(sub)
+        wins = [self.cal.window(season)] if season else self.cal.windows
+        ends = [_window_end(win, int(season_year)) for win in wins]
+        if ends and last < max(ends):
+            when = _day_words(last) + ("" if last.year == season_year else f" {last.year}")
+            label += f" (record ends {when})"
+        return label
+
+    def _month_start(self, season_year: int, month: int) -> pd.Timestamp:
+        """First day of ``month`` in calendar terms, for a given season year."""
+        name = _season_of_month(self.cal, month)
+        year = season_year
+        if name:
+            win = self.cal.window(name)
+            if win.wraps and month < win.start_md[0]:
+                year += 1
+        return pd.Timestamp(year, month, 1)
+
+    def _marker_dates_in(self, start: pd.Timestamp, stop: pd.Timestamp):
+        """Configured markers falling in ``[start, stop)``, as reference dates."""
+        out = []
+        for m in self.cfg.plots.date_markers:
+            for year in range(start.year, stop.year + 1):
+                try:
+                    t = pd.Timestamp(year, *m.md)
+                except ValueError:  # 29 Feb in a common year
+                    continue
+                if start <= t < stop:
+                    out.append((t, m.label))
+        return sorted(out)
+
+    def _marker_note(self, start, stop) -> str:
+        found = self._marker_dates_in(start, stop)
+        if not found:
+            return ""
+        words = [_day_words(t) + (f" ({lab})" if lab else "") for t, lab in found]
+        return "Dashed vertical lines mark " + _join_words(words)
+
+    def _calendar_axis(self, ax, start: pd.Timestamp, stop: pd.Timestamp) -> None:
+        """Day-of-month tick labels over ``[start, stop)``.
+
+        Ticks fall on the 1st and 15th, or on the 1st only when the axis is too
+        narrow for both. Configured marker dates are always ticks, in bold, so
+        each dashed line is labelled by the axis itself.
+        """
+        days = pd.date_range(start, stop - pd.Timedelta(days=1), freq="D")
+        ax_in = ax.get_position().width * ax.figure.get_figwidth()
+        both = days[days.day.isin([1, 15])]
+        use = both if len(both) and ax_in / len(both) >= 0.34 else days[days.day == 1]
+        marks = {t for t, _ in self._marker_dates_in(start, stop)}
+        # A regular tick closer to a marker than one label width would print on
+        # top of it; the marker wins.
+        min_gap = len(days) / max(ax_in, 0.1) * 0.22  # days per 0.22 in
+        use = [
+            t for t in use
+            if t in marks or all(abs((t - m).days) >= min_gap for m in marks)
+        ]
+        ticks = sorted(set(use) | marks)
+        ax.set_xticks(
+            [mdates.date2num(t) for t in ticks], [_day_words(t) for t in ticks]
+        )
+        roomy = bool(ticks) and ax_in / len(ticks) >= 0.8
+        ax.tick_params(axis="x", labelrotation=0 if roomy else 45, labelsize=10 if roomy else 9)
+        for t, lab in zip(ticks, ax.get_xticklabels()):
+            if not roomy:
+                lab.set_ha("right")
+                lab.set_rotation_mode("anchor")
+            if t in marks:
+                lab.set_fontweight("bold")
+                lab.set_color("#111111")
+        ax.set_xlim(mdates.date2num(start) - 1, mdates.date2num(stop) + 1)
+
+    def _mark_dates(self, ax, start, stop, labels: bool = True) -> None:
+        """Dashed vertical lines at the configured marker dates.
+
+        Drawn with ``vlines`` (a LineCollection), not ``axvline``: data series
+        stay the only Line2D artists, which the one-line-per-year tests rely on.
+        """
+        for t, label in self._marker_dates_in(start, stop):
+            x = mdates.date2num(t)
+            ax.vlines(
+                x, 0, 1, transform=ax.get_xaxis_transform(), colors=MARKER_COLOUR,
+                linestyles=(0, (5, 3)), linewidth=1.1, zorder=2.5,
+            )
+            if label and labels:
+                ax.text(
+                    x, 0.98, f" {label}", transform=ax.get_xaxis_transform(),
+                    rotation=90, ha="left", va="top", fontsize=9, color=MARKER_COLOUR,
+                )
+
     # -- shared drawing ----------------------------------------------------
 
     def _grouped_season_bars(self, ax, d, labels=True, fmt=_comma):
@@ -1190,6 +1899,84 @@ def _window_days(cal: SeasonCalendar) -> list[tuple[str, int]]:
     from .seasons import _window_length
 
     return [(w.name, _window_length(w, 2001)) for w in cal.windows]
+
+
+def _ref_start(w) -> pd.Timestamp:
+    return pd.Timestamp(REF_YEAR, *w.start_md)
+
+
+def _ref_window(w, span: int) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Reference-year ``[start, stop)`` of a window ``span + 1`` days long."""
+    start = _ref_start(w)
+    return start, start + pd.Timedelta(days=span + 1)
+
+
+def _window_start(w, season_year: int) -> pd.Timestamp:
+    return pd.Timestamp(int(season_year), *w.start_md)
+
+
+def _window_end(w, season_year: int) -> pd.Timestamp:
+    year = int(season_year) + (1 if w.wraps else 0)
+    m, d = w.end_md
+    try:
+        return pd.Timestamp(year, m, d)
+    except ValueError:  # 29 Feb in a common year
+        return pd.Timestamp(year, m, d - 1)
+
+
+def _record_end(sub: pd.DataFrame) -> pd.Timestamp:
+    return pd.Timestamp(pd.to_datetime(sub["acq_date"]).max()).normalize()
+
+
+def _scale_top(vmax: float, base: int) -> float:
+    """``vmax`` rounded up to the next multiple of ``base``; never below ``base``.
+
+    An exact multiple stays put (1,000 -> 1,000 with base 500). The small
+    tolerance stops float noise in a density (999.9999999) from being read as
+    just over a multiple and pushing the scale a whole step higher.
+    """
+    import math
+
+    if not np.isfinite(vmax) or vmax <= 0:
+        return float(base)
+    return float(base * max(1, math.ceil(vmax / base - 1e-9)))
+
+
+def _map_aspect(gdf) -> float:
+    """Height / width of a lon-lat layer as geopandas draws it."""
+    x0, y0, x1, y1 = gdf.total_bounds
+    if x1 <= x0 or y1 <= y0:
+        return 1.0
+    return float((y1 - y0) / ((x1 - x0) * np.cos(np.radians((y0 + y1) / 2))))
+
+
+def _bin_edges(span: int, width: int) -> list[tuple[int, int]]:
+    """``(first day offset, n days)`` of each bin over a ``span + 1`` day window."""
+    n_days = span + 1
+    return [(b, min(width, n_days - b)) for b in range(0, n_days, width)]
+
+
+def _window_days_text(wins, width: int) -> str:
+    parts = []
+    for win in wins:
+        tail = (_window_span_days(win) + 1) % width
+        if tail:
+            parts.append(f"{win.name}: {tail} d")
+    return "; ".join(parts)
+
+
+def _n_days(n: int) -> str:
+    return f"{n} day" if n == 1 else f"{n} days"
+
+
+def _day_words(t) -> str:
+    return f"{t.day} {MONTH_ABB[t.month - 1]}"
+
+
+def _join_words(words: list[str]) -> str:
+    if len(words) <= 1:
+        return "".join(words)
+    return ", ".join(words[:-1]) + " and " + words[-1]
 
 
 def _span(yr: pd.DataFrame) -> str:

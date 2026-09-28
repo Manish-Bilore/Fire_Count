@@ -880,3 +880,397 @@ def test_from_csv_honours_the_configured_date_range(tmp_path):
     raw = Pipeline(cfg, map_key="X").fetch(from_csv=csv)
     assert len(raw) == 1
     assert str(raw["acq_date"].iloc[0]) == "2024-11-05"
+
+
+# --------------------------------------------------------------------------
+# 1.2.0: calendar-date axes, weekly bars, per-year maps and heatmaps
+# --------------------------------------------------------------------------
+
+
+def _daily_frame(years=(2019, 2020), end=None):
+    """One detection per district per in-season day; D1 burns double."""
+    rows = []
+    for y in years:
+        for day in pd.date_range(f"{y}-03-01", f"{y}-12-31", freq="D"):
+            if 7 <= day.month <= 9:
+                continue
+            if end is not None and day > pd.Timestamp(end):
+                continue
+            season = "Rabi" if day.month <= 6 else "Kharif"
+            for unit, n in (("D1", 2), ("D2", 1)):
+                rows += [dict(
+                    region="UP", season=season, season_year=y, year=y, month=day.month,
+                    doy=day.dayofyear, platform="VIIRS", sensor="VIIRS S-NPP (375 m)",
+                    acq_date=day.date(), confidence="n", frp=5.0, admin_unit=unit,
+                    latitude=27.0, longitude=81.0,
+                )] * n
+    return pd.DataFrame(rows)
+
+
+def _cfg(tmp_path, **plots):
+    from firepipe.config import PlotConfig
+
+    return Config(
+        start_date=date(2019, 1, 1), end_date=date(2020, 12, 31), out_dir=str(tmp_path),
+        regions=[{"name": "UP", "gpkg": "x.gpkg"}],
+        seasons=SeasonConfig(windows=[RABI, KHARIF]),
+        plots=PlotConfig(**plots),
+    )
+
+
+class _Capture:
+    """FigureWriter stand-in that keeps the figures instead of saving them."""
+
+    def __init__(self):
+        self.figs = {}
+        self.written = []
+
+    def save(self, fig, name):
+        import matplotlib.pyplot as plt
+
+        self.figs[name] = [
+            dict(
+                lines=len(ax.lines),
+                markers=sum(
+                    1 for c in ax.collections
+                    if type(c).__name__ == "LineCollection"
+                ),
+                bars=[(p.get_x(), p.get_width(), p.get_height()) for p in ax.patches],
+            )
+            for ax in fig.axes
+        ]
+        plt.close(fig)
+
+
+def test_date_markers_accept_strings_and_reject_bad_dates():
+    from firepipe.config import PlotConfig
+
+    pc = PlotConfig(date_markers=["04-01", {"date": "10-15", "label": "CAQM"}])
+    assert [m.date for m in pc.date_markers] == ["04-01", "10-15"]
+    assert pc.date_markers[1].label == "CAQM"
+    assert [m.date for m in PlotConfig().date_markers] == [
+        "04-01", "06-01", "10-15", "12-15"
+    ]
+    assert PlotConfig(date_markers=None).date_markers == []
+    with pytest.raises(ValueError):
+        PlotConfig(date_markers=["13-40"])
+
+
+def test_fingerprint_ignores_plot_settings(tmp_path):
+    """Figure options change no detection, so they must not look like a new analysis."""
+    a = _cfg(tmp_path)
+    b = _cfg(tmp_path, date_markers=[], district_map_metric="count", dpi=72)
+    assert a.fingerprint == b.fingerprint
+
+
+def test_markers_drawn_only_inside_each_window(tmp_path):
+    from firepipe.plots import FigureSuite
+
+    df = _daily_frame()
+    for markers, expect in (
+        (None, {"05_rabi_pentad": 2, "05_kharif_pentad": 2}),
+        (["04-01"], {"05_rabi_pentad": 1, "05_kharif_pentad": 0}),
+        ([], {"05_rabi_pentad": 0, "05_kharif_pentad": 0}),
+    ):
+        kw = {} if markers is None else {"date_markers": markers}
+        suite = FigureSuite(_cfg(tmp_path, **kw), df)
+        cap = _Capture()
+        suite.f05_pentad(suite.df, "UP", cap)
+        for name, n in expect.items():
+            ax = cap.figs[name][0]
+            assert ax["markers"] == n, (name, markers, ax["markers"])
+            # marker lines are collections, so the series count is untouched
+            assert ax["lines"] == df["season_year"].nunique()
+
+
+def test_weekly_bars_conserve_counts_and_shorten_the_last_bin(tmp_path):
+    import matplotlib.dates as mdates
+
+    from firepipe.plots import FigureSuite
+
+    df = _daily_frame()
+    suite = FigureSuite(_cfg(tmp_path), df)
+    cap = _Capture()
+    suite.f17_season_weekly_by_year(suite.df, "UP", cap)
+
+    for season, n_days, n_bins, tail in (("Rabi", 122, 18, 3), ("Kharif", 92, 14, 1)):
+        for y in (2019, 2020):
+            bars = cap.figs[f"17_{season.lower()}_weekly_by_year/17_{season.lower()}_weekly_{y}"][0]["bars"]
+            want = len(df[(df["season"] == season) & (df["season_year"] == y)])
+            assert len(bars) == n_bins
+            assert sum(h for _, _, h in bars) == want
+            assert sum(wd for _, wd, _ in bars) == n_days   # bars tile the window
+            assert bars[-1][1] == tail                      # short final bin
+        # the facet draws the same bars, one panel per year
+        facet = cap.figs[f"17_{season.lower()}_weekly_by_year"]
+        assert [len(p["bars"]) for p in facet if p["bars"]] == [n_bins, n_bins]
+
+    first = cap.figs["17_rabi_weekly_by_year/17_rabi_weekly_2019"][0]["bars"][0][0]
+    assert mdates.num2date(first).strftime("%m-%d") == "03-01"
+
+
+def test_weekly_bars_stop_at_the_record_end(tmp_path):
+    """Weeks with no observation yet must be absent, not drawn as zeros."""
+    from firepipe.plots import FigureSuite
+
+    df = _daily_frame(end="2020-04-10")
+    suite = FigureSuite(_cfg(tmp_path), df)
+    cap = _Capture()
+    suite.f17_season_weekly_by_year(suite.df, "UP", cap)
+    bars = cap.figs["17_rabi_weekly_by_year/17_rabi_weekly_2020"][0]["bars"]
+    assert len(bars) == 6          # 1 Mar .. the week containing 10 Apr
+    assert suite._year_label(suite.df, 2020, "Rabi") == "2020 (record ends 10 Apr)"
+    assert suite._year_label(suite.df, 2019, "Rabi") == "2019"
+
+
+def test_district_maps_share_one_scale_across_facet_and_files(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from firepipe.plots import FigureSuite
+
+    admin = gpd.GeoDataFrame(
+        {"DISTRICT": ["D1", "D2"]},
+        geometry=[box(80, 26, 81, 27), box(81, 26, 82, 27)],
+        crs="EPSG:4326",
+    )
+    region = SimpleNamespace(name="UP", admin=admin, cfg=SimpleNamespace(admin_field="DISTRICT"))
+    df = _daily_frame()
+    suite = FigureSuite(_cfg(tmp_path, district_map_metric="count"), df, regions=[region])
+
+    seen = []
+    orig = FigureSuite._choropleth
+    monkeypatch.setattr(
+        FigureSuite, "_choropleth",
+        staticmethod(lambda ax, gdf, values, vmax, **k: (seen.append((values.tolist(), vmax)),
+                                                         orig(ax, gdf, values, vmax, **k))),
+    )
+    cap = _Capture()
+    suite.f15_season_district_map_by_year(suite.df, "UP", cap)
+
+    rabi = [k for k in cap.figs if k.startswith("15_rabi_district_map_by_year/")]
+    assert sorted(rabi) == [
+        "15_rabi_district_map_by_year/15_rabi_district_map_2019",
+        "15_rabi_district_map_by_year/15_rabi_district_map_2020",
+    ]
+    # 2 seasons x 2 years, facet + individual = 8 draws, two scales (one per season)
+    assert len(seen) == 8
+    assert len({vmax for _, vmax in seen}) == 2
+    # D1 burns double on every day, so it is the maximum
+    assert all(vmax == max(vals) for vals, vmax in seen)
+
+
+def test_heatmaps_blank_unobserved_columns_and_keep_row_order(tmp_path, monkeypatch):
+    from firepipe.plots import FigureSuite
+
+    df = _daily_frame(end="2020-11-20")
+    suite = FigureSuite(_cfg(tmp_path), df)
+    grids = {}
+    orig = FigureSuite._district_heatmap
+    monkeypatch.setattr(
+        FigureSuite, "_district_heatmap",
+        staticmethod(lambda ax, fig, grid, vmax, xl, **k: (grids.setdefault(len(grids), (grid, vmax)),
+                                                          orig(ax, fig, grid, vmax, xl, **k))),
+    )
+    suite.f18_district_month_heatmap_by_year(suite.df, "UP", _Capture())
+    (g19, v19), (g20, v20) = grids[0], grids[1]
+    assert v19 == v20                                  # one scale for all years
+    assert list(g19.index) == list(g20.index) == ["D1", "D2"]
+    assert not g19.isna().any().any()
+    assert g20[12].isna().all() and g20[11].notna().all()   # Dec unobserved, Nov partial
+    assert g20.sum().sum() == len(df[df["season_year"] == 2020])
+
+    grids.clear()
+    suite.f19_season_district_week_heatmap_by_year(suite.df, "UP", _Capture())
+    kharif_2020 = grids[3][0]
+    assert kharif_2020.shape[1] == 14
+    assert kharif_2020.iloc[:, -1].isna().all()        # 31 Dec not yet observed
+    assert kharif_2020.sum().sum() == len(
+        df[(df["season"] == "Kharif") & (df["season_year"] == 2020)]
+    )
+
+
+def test_individual_figures_land_in_subfolders(tmp_path):
+    from firepipe.plots import FigureSuite
+    from firepipe.plots_simple import SimpleFigureSuite
+
+    df = _daily_frame()
+    cfg = _cfg(tmp_path, figures=["16", "17", "18", "19"])
+    full = FigureSuite(cfg, df).render_all(tmp_path / "figs")
+    simple = SimpleFigureSuite(cfg, df).render_all(tmp_path / "simple_plots")
+    rel = lambda paths, root: {str(p.relative_to(root)) for p in paths}
+    assert rel(full, tmp_path / "figs") == rel(simple, tmp_path / "simple_plots")
+    names = rel(full, tmp_path / "figs")
+    assert "up/16_weekly_by_year.png" in names
+    assert "up/16_weekly_by_year/16_weekly_2020.png" in names
+    assert "up/19_kharif_district_week_heatmap_by_year/19_kharif_district_week_heatmap_2019.png" in names
+    assert all(p.exists() for p in full + simple)
+
+
+# --------------------------------------------------------------------------
+# 1.2.1: blocks straddling the SP -> NRT boundary
+# --------------------------------------------------------------------------
+
+
+def _client_with_availability(tmp_path, rows):
+    from firepipe.config import FirmsConfig
+    from firepipe.firms import FirmsClient
+
+    client = FirmsClient(FirmsConfig(cache_dir=str(tmp_path)), map_key="TESTKEY")
+    client._availability = pd.DataFrame(
+        [dict(data_id=i, min_date=date.fromisoformat(a), max_date=date.fromisoformat(b))
+         for i, a, b in rows]
+    )
+    return client
+
+
+# The archive state behind the up_snpp_modis run (FIRMS availability, 19 Aug 2026)
+AVAIL_AUG_2026 = [
+    ("VIIRS_SNPP_SP", "2012-01-20", "2026-04-27"),
+    ("VIIRS_SNPP_NRT", "2026-04-28", "2026-08-19"),
+    ("MODIS_SP", "2000-11-01", "2026-04-30"),
+    ("MODIS_NRT", "2026-05-01", "2026-08-19"),
+]
+
+
+def test_block_straddling_the_sp_boundary_is_split(tmp_path):
+    """Routing by a block's first day silently dropped 28-29 Apr (S-NPP) and
+    1-4 May (MODIS) from Rabi 2026: SP returns an empty table past its end."""
+    from unittest.mock import patch
+
+    from firepipe.config import SensorConfig
+    from firepipe.firms import BBox
+    from firepipe.seasons import DateRange
+
+    client = _client_with_availability(tmp_path, AVAIL_AUG_2026)
+    sensors = SensorConfig(platforms=["VIIRS_SNPP", "MODIS"], headline_platform_group="BOTH")
+    ranges = [
+        DateRange(date(2026, 4, 20), date(2026, 4, 24), "Rabi", 2026),   # all SP
+        DateRange(date(2026, 4, 25), date(2026, 4, 29), "Rabi", 2026),   # S-NPP straddles
+        DateRange(date(2026, 4, 30), date(2026, 5, 4), "Rabi", 2026),    # MODIS straddles
+        DateRange(date(2026, 5, 5), date(2026, 5, 9), "Rabi", 2026),     # all NRT
+    ]
+    calls = []
+    with patch.object(
+        client, "fetch_block",
+        side_effect=lambda src, bb, start, n: calls.append((src, start, n)) or pd.DataFrame(),
+    ):
+        client.fetch_ranges(ranges, BBox(76.9, 23.7, 84.7, 30.5), sensors, progress=False)
+
+    assert calls == [
+        ("VIIRS_SNPP_SP", date(2026, 4, 20), 5),
+        ("VIIRS_SNPP_SP", date(2026, 4, 25), 3),
+        ("VIIRS_SNPP_NRT", date(2026, 4, 28), 2),
+        ("VIIRS_SNPP_NRT", date(2026, 4, 30), 5),
+        ("VIIRS_SNPP_NRT", date(2026, 5, 5), 5),
+        ("MODIS_SP", date(2026, 4, 20), 5),
+        ("MODIS_SP", date(2026, 4, 25), 5),
+        ("MODIS_SP", date(2026, 4, 30), 1),
+        ("MODIS_NRT", date(2026, 5, 1), 4),
+        ("MODIS_NRT", date(2026, 5, 5), 5),
+    ]
+    # every requested day is requested exactly once per platform
+    for plat in ("VIIRS_SNPP", "MODIS"):
+        days = [c[1] + pd.Timedelta(days=i) for c in calls if c[0].startswith(plat) for i in range(c[2])]
+        assert len(days) == len(set(days)) == 20
+
+
+def test_unstraddled_blocks_keep_their_cache_key(tmp_path):
+    """Blocks inside one dataset must be requested whole, as before, or every
+    existing cache entry would become a miss."""
+    from firepipe.config import SensorConfig
+    from firepipe.seasons import DateRange
+
+    client = _client_with_availability(tmp_path, AVAIL_AUG_2026)
+    sensors = SensorConfig(platforms=["VIIRS_SNPP"])
+    r = DateRange(date(2025, 10, 1), date(2025, 10, 5), "Kharif", 2025)
+    assert client.route_block("VIIRS_SNPP", r, sensors) == [(date(2025, 10, 1), 5, "VIIRS_SNPP_SP")]
+
+    # a block running past the end of every archive keeps its covered part
+    r = DateRange(date(2026, 8, 18), date(2026, 8, 22), "X", 2026)
+    assert client.route_block("VIIRS_SNPP", r, sensors) == [
+        (date(2026, 8, 18), 2, "VIIRS_SNPP_NRT"),
+        (date(2026, 8, 20), 3, None),
+    ]
+
+
+def test_partial_year_titles_can_be_switched_off(tmp_path):
+    from firepipe.plots import FigureSuite
+
+    df = _daily_frame(end="2020-04-10")
+    on = FigureSuite(_cfg(tmp_path), df)
+    off = FigureSuite(_cfg(tmp_path, partial_year_titles=False), df)
+    assert on._year_label(on.df, 2020, "Rabi") == "2020 (record ends 10 Apr)"
+    assert off._year_label(off.df, 2020, "Rabi") == "2020"
+    assert off._year_label(off.df, 2020) == "2020"
+
+
+def test_season_district_year_heatmaps_rank_and_scale_on_their_own_season(tmp_path):
+    """The per-season figures must not be slices of the pooled one: a district
+    that only burns in Kharif has to survive a Rabi-dominated ranking."""
+    from firepipe.plots import FigureSuite
+
+    rows = []
+    for y in (2019, 2020):
+        for unit, season, n in (
+            ("RABI_TOP", "Rabi", 50), ("BOTH", "Rabi", 45), ("BOTH", "Kharif", 5),
+            ("KHARIF_TOP", "Kharif", 30),
+        ):
+            # Kharif on the window's last day: both seasons closed, so this test
+            # sees no partial-year marks and isolates ranking and scale.
+            day = date(y, 3, 1) if season == "Rabi" else date(y, 12, 31)
+            rows += [dict(
+                region="UP", season=season, season_year=y, year=y, month=day.month,
+                doy=day.timetuple().tm_yday, platform="VIIRS",
+                sensor="VIIRS S-NPP (375 m)", acq_date=day,
+                confidence="n", frp=5.0, admin_unit=unit, latitude=27.0, longitude=81.0,
+            )] * n
+    df = pd.DataFrame(rows)
+    suite = FigureSuite(_cfg(tmp_path, top_n_districts=2), df)
+
+    grids = {}
+
+    def capture(ax, fig, grid, vmax, xlabels, **k):
+        grids[len(grids)] = (list(grid.index), grid.to_numpy(), vmax, xlabels)
+
+    suite._district_heatmap = staticmethod(capture)
+    cap = _Capture()
+    suite.f12_district_heatmap(suite.df, "UP", cap)
+
+    assert list(cap.figs) == [
+        "12_district_year_heatmap",
+        "12_rabi_district_year_heatmap",
+        "12_kharif_district_year_heatmap",
+    ]
+    pooled, rabi, kharif = (grids[i] for i in range(3))
+    assert pooled[0] == ["RABI_TOP", "BOTH"]          # Kharif-only district ranked out
+    assert rabi[0] == ["RABI_TOP", "BOTH"]
+    assert kharif[0] == ["KHARIF_TOP", "BOTH"]        # ranked on Kharif alone
+    assert (kharif[1] == 30).any() and kharif[2] == 30  # own scale, not Rabi's 50
+    assert pooled[2] == 50 and rabi[2] == 50
+    assert kharif[3] == ["2019", "2020"]              # no partial marks
+
+
+def test_partial_season_year_column_is_starred_not_silently_short(tmp_path):
+    from firepipe.plots import FigureSuite
+
+    df = _daily_frame(end="2020-11-20")          # Kharif 2020 cut mid-window
+    grids = {}
+    suite = FigureSuite(_cfg(tmp_path), df)
+    suite._district_heatmap = staticmethod(
+        lambda ax, fig, grid, vmax, xlabels, **k: grids.setdefault(len(grids), xlabels)
+    )
+    suite.f12_district_heatmap(suite.df, "UP", _Capture())
+    assert grids[0] == ["2019", "2020*"]         # pooled: 2020 still running
+    assert grids[1] == ["2019", "2020"]          # Rabi 2020 closed 30 Jun: complete
+    assert grids[2] == ["2019", "2020*"]         # Kharif 2020 still running
+
+    grids.clear()
+    off = FigureSuite(_cfg(tmp_path, partial_year_titles=False), df)
+    off._district_heatmap = staticmethod(
+        lambda ax, fig, grid, vmax, xlabels, **k: grids.setdefault(len(grids), xlabels)
+    )
+    off.f12_district_heatmap(off.df, "UP", _Capture())
+    assert grids[2] == ["2019", "2020"]          # switch also silences the star

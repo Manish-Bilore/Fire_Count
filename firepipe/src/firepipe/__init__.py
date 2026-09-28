@@ -24,7 +24,7 @@ from .plots import FigureSuite, render
 from .plots_simple import SimpleFigureSuite, render_both, render_simple
 from .seasons import SeasonCalendar
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "Config",

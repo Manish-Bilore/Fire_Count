@@ -1,0 +1,94 @@
+name: tests
+
+# Repository root workflow. GitHub only reads .github/workflows from the root,
+# so this cannot live inside firepipe/ even though that is where the package is.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: firepipe/pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "./firepipe[dev]"
+
+      - name: Run tests
+        # Entirely offline: FIRMS responses are mocked and rasters synthesised,
+        # so CI needs no MAP_KEY and no network.
+        run: pytest firepipe -q
+
+      - name: Check the CLI starts
+        run: |
+          firepipe --help
+          firepipe init -o /tmp/config.yaml
+          test -s /tmp/config.yaml
+
+      - name: Validate the shipped configs
+        # Every config in firepipe/configs must at least load and validate.
+        # This is what catches a headline_platform_group that contradicts the
+        # platform list, or a season window typo, before anyone runs it.
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          from firepipe.config import Config
+
+          failed = []
+          for path in sorted(Path("firepipe/configs").glob("*.yaml")):
+              try:
+                  cfg = Config.from_yaml(path)
+                  print(f"  ok    {path.name}: {len(cfg.regions)} region(s), "
+                        f"{[w.name for w in cfg.seasons.windows]}, "
+                        f"{cfg.sensors.platforms}")
+              except Exception as exc:
+                  failed.append((path.name, exc))
+                  print(f"  FAIL  {path.name}: {exc}")
+          if failed:
+              sys.exit(f"{len(failed)} config(s) failed to validate")
+          PY
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: Lint
+        run: ruff check firepipe/src firepipe/tests --select E9,F63,F7,F82
+      - name: Guard against committed secrets
+        run: |
+          # A FIRMS MAP_KEY is 32 hex characters. Fail loudly if one appears in
+          # any text file in the tree.
+          if grep -rInE '[0-9a-f]{32}' \
+               --include='*.py' --include='*.yaml' --include='*.yml' \
+               --include='*.md' --include='*.R' . ; then
+            echo "::error::Possible MAP_KEY committed - rotate it immediately"
+            exit 1
+          fi
+          echo "No 32-hex-character strings found."
